@@ -10,13 +10,17 @@ members = [
     "crates/obscura-render",
     "crates/obscura-cli",
     "crates/obscura",
+    "crates/glass-ledger",
+    "crates/glass-capture",
+    "crates/glass-terminus",
+    "crates/glass-govern",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/h4ckf0r0day/obscura"
+repository = "https://github.com/jourdanlabs/omnis-glass"
 
 [workspace.dependencies]
 obscura-dom = { path = "crates/obscura-dom" }
@@ -40,6 +44,7 @@ tiny-skia = "0.12"
 ab_glyph = "0.2"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.26"
+futures-util = "0.3"
 # No "cookies" feature: obscura manages cookies through its own CookieJar
 # (obscura-net/src/cookies.rs) and never uses reqwest's cookie store. Pulling
 # it in only added the cookie/cookie_store crates, and cookie 0.18.1's blanket
@@ -55,6 +60,16 @@ uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 anyhow = "1"
 base64 = "0.22"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+serde_yaml = "0.9"
+glass-ledger = { path = "crates/glass-ledger" }
+glass-capture = { path = "crates/glass-capture" }
+glass-terminus = { path = "crates/glass-terminus" }
+glass-govern = { path = "crates/glass-govern" }
 
 [patch.crates-io]
 # Keep the grid shrink-to-fit correction local until it lands upstream.

@@ -198,6 +198,26 @@ enum Command {
         #[arg(long)]
         user_agent: Option<String>,
     },
+
+    /// OMNIS GLASS receipt ledger operations
+    Receipts {
+        #[command(subcommand)]
+        action: ReceiptsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReceiptsAction {
+    /// Verify the browser.action hash chain
+    Verify {
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+    },
+    /// Print ledger status (entry count, chain head)
+    Status {
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Clone, Debug, clap::ValueEnum, PartialEq, Eq)]
@@ -521,6 +541,9 @@ async fn main() -> anyhow::Result<()> {
                 obscura_mcp::run(mcp_proxy, user_agent, stealth).await?;
             }
         }
+        Some(Command::Receipts { action }) => {
+            run_receipts(action)?;
+        }
         None => {
             print_banner(args.port);
             if let Some(ref proxy) = args.proxy {
@@ -530,6 +553,46 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn glass_state_dir(override_dir: Option<std::path::PathBuf>) -> std::path::PathBuf {
+    override_dir.or_else(|| std::env::var("OMNIS_GLASS_STATE_DIR").ok().map(std::path::PathBuf::from))
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            std::path::PathBuf::from(home).join(".omnis-glass")
+        })
+}
+
+fn run_receipts(action: ReceiptsAction) -> anyhow::Result<()> {
+    use glass_ledger::verify_chain;
+
+    match action {
+        ReceiptsAction::Verify { state_dir } => {
+            let dir = glass_state_dir(state_dir);
+            let path = dir.join("browser.actions.jsonl");
+            let result = verify_chain(&path, None);
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "ok": result.ok,
+                "count": result.count,
+                "first_break_index": result.first_break_index,
+                "reason": result.reason,
+            }))?);
+            if !result.ok {
+                std::process::exit(1);
+            }
+        }
+        ReceiptsAction::Status { state_dir } => {
+            let dir = glass_state_dir(state_dir);
+            let path = dir.join("browser.actions.jsonl");
+            let result = verify_chain(&path, None);
+            println!(
+                "OMNIS GLASS receipts: {} entries, chain {}",
+                result.count,
+                if result.ok { "valid" } else { "BROKEN" }
+            );
+        }
+    }
     Ok(())
 }
 
@@ -695,9 +758,11 @@ async fn run_fetch(
     obey_robots: bool,
     screenshot: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
-    // Whether the user explicitly passed --dump. With --eval also present this
-    // decides whether we return the eval value or read the page after the
-    // eval's async work settles (issue #248).
+    use glass_govern::{emit_live_capture, gate_browser_action};
+    use glass_terminus::BrowserAction;
+    use serde_json::json;
+
+    // Whether the user explicitly passed --dump.
     let dump_specified = dump.is_some();
     let dump = dump.unwrap_or(DumpFormat::Html);
 
@@ -706,6 +771,7 @@ async fn run_fetch(
     // payloads (images, fonts, …) and any non-HTML resource where parsing the
     // body through the DOM/JS layer would corrupt or discard data.
     if dump == DumpFormat::Original {
+        std::env::set_var("OMNIS_GLASS_HTTP_ACTION", "dump-original");
         let bytes = fetch_original_bytes(
             url_str,
             proxy,
@@ -762,11 +828,10 @@ async fn run_fetch(
         eprintln!("Fetching {}...", url_str);
     }
 
-    // The paired corpus opts into a truthful capture boundary: its read-only
-    // evaluation runs after all settle passes and the final scroll reassert,
-    // immediately before screenshot paint. Ordinary CLI evaluation retains
-    // its existing evaluate-then-settle behavior when this private variable is
-    // absent.
+    gate_browser_action(BrowserAction::Navigate, url_str, None, "cli")
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    // The paired corpus opts into a truthful capture boundary
     let eval_at_capture_boundary = screenshot.is_some()
         && eval.is_some()
         && std::env::var("OBSCURA_SHOT_EVAL_AT_CAPTURE").is_ok_and(|value| value == "1");
@@ -869,8 +934,14 @@ async fn run_fetch(
 
     if !eval_at_capture_boundary {
         if let Some(ref expr) = eval {
-            // Bound the eval by the same budget as navigation so a runaway
-            // expression (infinite loop, never-settling sync work) cannot hang.
+            gate_browser_action(
+                BrowserAction::Eval,
+                url_str,
+                Some(json!({"script": expr})),
+                "cli",
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            // Bound the eval by the same budget as navigation
             let result = page.evaluate_with_timeout(expr, Duration::from_secs(timeout_secs));
 
             // A bare --eval (no --selector, --dump, or --screenshot) returns the
@@ -1081,6 +1152,13 @@ async fn run_fetch(
         // Handled above via the short-circuit branch; unreachable here.
         DumpFormat::Original => unreachable!("Original dump handled before page navigation"),
     };
+    emit_live_capture(
+        url_str,
+        &page.url_string(),
+        rendered.as_bytes(),
+        200,
+        None,
+    );
     write_or_print(rendered, output.as_ref()).await?;
 
     // Save cookies to disk if storage_dir is configured
@@ -1096,6 +1174,7 @@ async fn fetch_original_response(
     timeout_secs: u64,
     stealth: bool,
 ) -> anyhow::Result<obscura_net::Response> {
+    std::env::set_var("OMNIS_GLASS_HTTP_ACTION", "dump-original");
     let url = url::Url::parse(url_str)
         .map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", url_str, e))?;
 
@@ -1525,6 +1604,9 @@ async fn run_parallel_scrape(
     stealth: bool,
     obey_robots: bool,
 ) -> anyhow::Result<()> {
+    use glass_govern::{emit_live_capture, gate_browser_action};
+    use glass_terminus::BrowserAction;
+
     let total = urls.len();
     let start = Instant::now();
 
@@ -1574,6 +1656,30 @@ async fn run_parallel_scrape(
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
             let task_start = Instant::now();
+
+            if let Err(reason) = gate_browser_action(BrowserAction::Navigate, &url, None, "cli-scrape")
+            {
+                return serde_json::json!({
+                    "url": url,
+                    "error": format!("TERMINUS REFUSE: {reason}"),
+                    "time_ms": task_start.elapsed().as_millis(),
+                });
+            }
+
+            if let Some(ref expr) = *eval {
+                if let Err(reason) = gate_browser_action(
+                    BrowserAction::Eval,
+                    &url,
+                    Some(serde_json::json!({"script": expr})),
+                    "cli-scrape",
+                ) {
+                    return serde_json::json!({
+                        "url": url,
+                        "error": format!("TERMINUS REFUSE (eval): {reason}"),
+                        "time_ms": task_start.elapsed().as_millis(),
+                    });
+                }
+            }
 
             let mut child = match TokioCommand::new(worker_path.as_ref())
                 .stdin(std::process::Stdio::piped())
@@ -1684,6 +1790,14 @@ async fn run_parallel_scrape(
                     let _ = stdin.write_all(line.as_bytes()).await;
                     let _ = stdin.flush().await;
                     let _ = timeout(shutdown_timeout, child.wait()).await;
+
+                    emit_live_capture(
+                        &url,
+                        &url,
+                        title.as_bytes(),
+                        200,
+                        None,
+                    );
 
                     Ok(serde_json::json!({
                         "url": url,

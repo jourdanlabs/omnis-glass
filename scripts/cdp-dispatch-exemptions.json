@@ -1,0 +1,18 @@
+{
+  "files": [
+    "crates/obscura-cdp/tests/glass_acceptance.rs",
+    "crates/obscura-cdp/src/dispatch.rs"
+  ],
+  "entries": [
+    {
+      "file": "crates/obscura-cdp/src/dispatch.rs",
+      "symbol": "dispatch_send_message_to_target",
+      "reason": "Target.sendMessageToTarget recurses into gated dispatch"
+    },
+    {
+      "file": "crates/obscura-cdp/src/domains/page.rs",
+      "symbol": "dispatch::dispatch",
+      "reason": "Internal CDP test helper routes through gated dispatch"
+    }
+  ]
+}

@@ -10,6 +10,10 @@ name = "obscura"
 path = "src/main.rs"
 
 [[bin]]
+name = "omnis-glass"
+path = "src/main.rs"
+
+[[bin]]
 name = "obscura-worker"
 path = "src/worker.rs"
 
@@ -33,6 +37,10 @@ anyhow = { workspace = true }
 url = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+glass-ledger = { workspace = true }
+glass-capture = { workspace = true }
+glass-terminus = { workspace = true }
+glass-govern = { workspace = true }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

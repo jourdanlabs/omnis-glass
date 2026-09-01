@@ -1,0 +1,93 @@
+# OMNIS GLASS browser lanes — policy digest computed at boot
+policy_version: "glass-lanes-v1.1"
+coverage_class: "browser-v1.1"
+
+lanes:
+  browse:research:
+    sensitive: false
+    hosts:
+      - "example.com"
+      - "example.org"
+      - "httpbin.org"
+      - "www.w3.org"
+    allowed_origins:
+      - "https://example.com"
+      - "https://example.org"
+      - "https://httpbin.org"
+      - "https://www.w3.org"
+    egress_rule: record
+    max_download_bytes: 52428800
+    screenshot_policy: allow
+    allowed_residencies:
+      - US
+      - local
+
+  browse:scrape:
+    sensitive: false
+    hosts:
+      - "example.com"
+      - "example.org"
+      - "httpbin.org"
+    allowed_origins:
+      - "https://example.com"
+      - "https://example.org"
+      - "https://httpbin.org"
+    egress_rule: read_only
+    max_download_bytes: 104857600
+    screenshot_policy: allow
+    allowed_residencies:
+      - US
+      - local
+
+  browse:authenticated:
+    sensitive: true
+    hosts:
+      - "github.com"
+    allowed_origins:
+      - "https://github.com"
+    egress_rule: gate_submit
+    max_download_bytes: 52428800
+    screenshot_policy: allow
+    allowed_residencies:
+      - US
+      - local
+    sensitive_hosts:
+      - "github.com"
+
+  browse:local:
+    sensitive: true
+    hosts:
+      - "localhost"
+      - "127.0.0.1"
+    allowed_origins:
+      - "http://localhost"
+      - "http://127.0.0.1"
+      - "file://"
+    egress_rule: deny_external
+    max_download_bytes: 10485760
+    screenshot_policy: allow
+    allowed_residencies:
+      - local
+
+  browse:human:
+    sensitive: false
+    hosts:
+      - "example.com"
+      - "example.org"
+      - "httpbin.org"
+      - "www.w3.org"
+      - "localhost"
+      - "127.0.0.1"
+    allowed_origins:
+      - "https://example.com"
+      - "https://example.org"
+      - "https://httpbin.org"
+      - "https://www.w3.org"
+      - "http://localhost"
+      - "http://127.0.0.1"
+    egress_rule: record
+    max_download_bytes: 52428800
+    screenshot_policy: allow
+    allowed_residencies:
+      - US
+      - local

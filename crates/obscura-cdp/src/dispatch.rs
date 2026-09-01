@@ -449,6 +449,11 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         return dispatch_send_message_to_target(req, ctx).await;
     }
 
+    // OMNIS GLASS: TERMINUS egress gate before any governed CDP side effect.
+    if let Some(block) = crate::glass::gate_cdp_command(&req.method, &req.params, &req.session_id) {
+        return CdpResponse::error(req.id, -32603, block, req.session_id.clone());
+    }
+
     // Issue #430: keep this connection's V8 work serialized on its own thread.
     //
     // Every CDP handler below may call into a per-Page `JsRuntime` (each owning

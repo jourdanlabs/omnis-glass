@@ -1224,6 +1224,23 @@ async fn do_navigate(
         let network_events: Vec<_> = page.network_events.drain(..).collect();
         let page_url = page.url_string();
         let page_id = page.id.clone();
+        crate::glass::record_navigation(
+            session_id.as_deref().unwrap_or("default"),
+            &page_url,
+        );
+        if let Some(err) = crate::glass::check_post_navigate_redirect(url, &page_url) {
+            return Err(err);
+        }
+        if crate::glass::governance_enabled() {
+            let html = page.with_dom(|dom| {
+                if let Ok(Some(html_node)) = dom.query_selector("html") {
+                    format!("<!DOCTYPE html>\n{}", dom.outer_html(html_node))
+                } else {
+                    dom.inner_html(dom.document())
+                }
+            }).unwrap_or_default();
+            crate::glass::emit_live_capture(url, &page_url, html.as_bytes(), 200, None);
+        }
         (
             frame_id,
             loader_id,

@@ -1373,6 +1373,26 @@ impl ObscuraHttpClient {
         validate_url(url, self.allow_private_network)?;
         validate_request_mode(&request, url)?;
 
+        // OMNIS GLASS: TERMINUS egress gate before any outbound HTTP bytes leave.
+        let gate_kind = match std::env::var("OMNIS_GLASS_HTTP_ACTION")
+            .ok()
+            .as_deref()
+        {
+            Some("dump-original") => glass_govern::HttpGateAction::DumpOriginal,
+            _ => match request.resource_type {
+                ResourceType::Fetch | ResourceType::Xhr => glass_govern::HttpGateAction::ScriptFetch,
+                _ => glass_govern::HttpGateAction::Navigate,
+            },
+        };
+        if let Err(reason) = glass_govern::gate_http_outbound(
+            url,
+            initial_body.as_deref(),
+            gate_kind,
+            "http",
+        ) {
+            return Err(ObscuraNetError::Blocked(reason));
+        }
+
         if url.scheme() == "file" {
             return fetch_file_url(url, request.max_response_bytes).await;
         }
@@ -1590,6 +1610,18 @@ impl ObscuraHttpClient {
                     })?;
                     validate_url(&next_url, self.allow_private_network)?;
                     validate_request_mode(&request, &next_url)?;
+                    // OMNIS GLASS: re-gate redirect + strip cross-origin credentials.
+                    if let Err(reason) = glass_govern::gate_redirect_destination(
+                        current_url.as_str(),
+                        next_url.as_str(),
+                        "http",
+                    ) {
+                        return Err(ObscuraNetError::Blocked(reason));
+                    }
+                    if redirect_taints_origin(&request, &current_url, &next_url) {
+                        let mut extra = self.extra_headers.write().await;
+                        glass_govern::strip_cross_origin_auth(&mut extra, &current_url, &next_url);
+                    }
                     redirect_tainted |=
                         redirect_taints_origin(&request, &current_url, &next_url);
                     redirects.push(current_url.clone());

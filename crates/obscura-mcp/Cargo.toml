@@ -21,3 +21,6 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true, optional = true }
+glass-govern = { workspace = true }
+glass-ledger = { workspace = true }
+glass-terminus = { workspace = true }

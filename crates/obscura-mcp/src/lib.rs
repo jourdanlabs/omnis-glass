@@ -4,6 +4,7 @@
 #![recursion_limit = "512"]
 
 pub mod http;
+pub mod glass;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -106,6 +107,15 @@ impl BrowserState {
         let id = self.active_tab.as_ref().unwrap().clone();
         self.activate(&id);
         self.tabs.get_mut(&id).expect("active tab must exist")
+    }
+
+    fn page(&self) -> &Page {
+        let id = self.active_tab.as_ref().expect("active tab");
+        self.tabs.get(id).expect("active tab must exist")
+    }
+
+    fn page_url(&mut self) -> String {
+        self.page_mut().url_string()
     }
 
     fn new_tab(&mut self) -> String {
@@ -303,7 +313,7 @@ fn handle_initialize(id: Value, params: &Value) -> RpcResponse {
             "tools": {}
         },
         "serverInfo": {
-            "name": "obscura-mcp",
+            "name": "omnis-glass",
             "version": env!("CARGO_PKG_VERSION")
         }
     }))
@@ -794,13 +804,23 @@ async fn handle_tool_call(id: Value, params: &Value, state: &mut BrowserState) -
     };
 
     match result {
-        Ok(content) => RpcResponse::ok(id, json!({
-            "content": [{ "type": "text", "text": content }]
-        })),
-        Err(e) => RpcResponse::ok(id, json!({
-            "content": [{ "type": "text", "text": format!("Error: {e}") }],
-            "isError": true
-        })),
+        Ok(content) => {
+            let page_url = state.page_url();
+            let provenance_tools = [
+                "browser_snapshot",
+                "browser_markdown",
+                "browser_extract",
+                "browser_links",
+            ];
+            if provenance_tools.contains(&name) {
+                RpcResponse::ok(id, glass::wrap_text_result(&content, &page_url))
+            } else {
+                RpcResponse::ok(id, json!({
+                    "content": [{ "type": "text", "text": content }]
+                }))
+            }
+        }
+        Err(e) => RpcResponse::ok(id, glass::wrap_error(e)),
     }
 }
 
@@ -931,6 +951,7 @@ fn truncate(text: &str, max_chars: usize) -> String {
 async fn tool_navigate(args: &Value, state: &mut BrowserState) -> Result<String, String> {
     let url = args.get("url").and_then(Value::as_str)
         .ok_or("Missing url parameter")?;
+    glass::gate_mcp_navigate(url)?;
     let wait_until = args.get("waitUntil").and_then(Value::as_str).unwrap_or("load");
 
     let condition = obscura_browser::lifecycle::WaitUntil::from_str(wait_until);
@@ -980,6 +1001,8 @@ fn tool_snapshot(args: &Value, state: &mut BrowserState) -> Result<String, Strin
 
 async fn tool_click(args: &Value, state: &mut BrowserState) -> Result<String, String> {
     let selector = resolve_target(args, state)?;
+    let page_url = state.page_url();
+    glass::gate_mcp_click(&page_url)?;
 
     let js = format!(
         r#"(function(){{
@@ -1007,6 +1030,8 @@ async fn tool_fill(args: &Value, state: &mut BrowserState) -> Result<String, Str
     let selector = resolve_target(args, state)?;
     let value = args.get("value").and_then(Value::as_str)
         .ok_or("Missing value parameter")?;
+    let page_url = state.page_url();
+    glass::gate_mcp_type(value, &page_url)?;
 
     let js = format!(
         r#"(function(){{
@@ -1034,6 +1059,8 @@ async fn tool_type(args: &Value, state: &mut BrowserState) -> Result<String, Str
     let selector = resolve_target(args, state)?;
     let text = args.get("text").and_then(Value::as_str)
         .ok_or("Missing text parameter")?;
+    let page_url = state.page_url();
+    glass::gate_mcp_type(text, &page_url)?;
 
     let js = format!(
         r#"(function(){{
@@ -1115,6 +1142,8 @@ fn tool_select_option(args: &Value, state: &mut BrowserState) -> Result<String, 
 async fn tool_evaluate(args: &Value, state: &mut BrowserState) -> Result<String, String> {
     let expression = args.get("expression").and_then(Value::as_str)
         .ok_or("Missing expression parameter")?;
+    let page_url = state.page_url();
+    glass::gate_mcp_eval(expression, &page_url)?;
 
     let result = state.page_mut().evaluate(expression);
     state.settle_synthetic_navigation().await?;
@@ -1411,6 +1440,7 @@ fn tool_get_cookies(args: &Value, state: &BrowserState) -> Result<String, String
 }
 
 fn tool_set_cookie(args: &Value, state: &BrowserState) -> Result<String, String> {
+    glass::gate_mcp_storage("mcp://cookie")?;
     let name = args.get("name").and_then(Value::as_str)
         .ok_or("Missing name parameter")?;
     let value = args.get("value").and_then(Value::as_str)
@@ -1435,6 +1465,7 @@ fn tool_set_cookie(args: &Value, state: &BrowserState) -> Result<String, String>
 }
 
 fn tool_clear_cookies(state: &BrowserState) -> Result<String, String> {
+    glass::gate_mcp_storage("mcp://clear-cookies")?;
     state.context.cookie_jar.clear();
     Ok("Cleared all cookies.".to_string())
 }
@@ -1966,6 +1997,8 @@ fn tool_storage_state(state: &mut BrowserState) -> Result<String, String> {
 }
 
 fn tool_set_storage_state(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    let page_url = state.page_url();
+    glass::gate_mcp_storage(&page_url)?;
     let s = args.get("state").ok_or("Missing state object")?;
     let mut applied = 0u32;
     // Cookies
