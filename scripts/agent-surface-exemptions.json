@@ -1,0 +1,18 @@
+{
+  "files": [
+    "crates/obscura-js/src/ops.rs"
+  ],
+  "entries": [
+    {
+      "file": "crates/obscura-js/src/ops.rs",
+      "pattern": "cached_request_client",
+      "reason": "op_fetch_url falls back only when no ObscuraHttpClient; gate_js_fetch runs before client selection"
+    },
+    {
+      "file": "crates/obscura-cli/src/main.rs",
+      "pattern": "page.evaluate",
+      "lines": [951, 1083, 1109],
+      "reason": "capture-harness viewport reads after navigate/eval TERMINUS gates in run_fetch"
+    }
+  ]
+}

@@ -2374,6 +2374,17 @@ async fn op_fetch_url(
             })
             .to_string());
         }
+        if let Err(e) = gate_js_fetch(&url, &body, None) {
+            return Ok(serde_json::json!({
+                "status": 0,
+                "body": "",
+                "url": url,
+                "headers": {},
+                "blocked": true,
+                "error": e,
+            })
+            .to_string());
+        }
     }
     struct PageInFlightGuard(Arc<std::sync::atomic::AtomicU32>);
     impl Drop for PageInFlightGuard {
@@ -2467,6 +2478,16 @@ async fn op_fetch_url(
                     "url": new_url,
                     "blocked": true,
                     "error": format!("Intercept rewrite to forbidden URL blocked: {}", reason),
+                })
+                .to_string());
+            }
+            if let Err(reason) = gate_js_fetch(&new_url, &body, Some(&url)) {
+                return Ok(serde_json::json!({
+                    "status": 0,
+                    "body": "",
+                    "url": new_url,
+                    "blocked": true,
+                    "error": format!("Intercept rewrite blocked by TERMINUS: {}", reason),
                 })
                 .to_string());
             }
@@ -2712,6 +2733,17 @@ async fn op_fetch_url(
             })
             .to_string());
         }
+        if let Err(reason) = gate_js_fetch(next_url.as_str(), &current_body, Some(&current_url)) {
+            return Ok(serde_json::json!({
+                "status": 0,
+                "body": "",
+                "url": next_url.to_string(),
+                "headers": {},
+                "blocked": true,
+                "error": format!("Redirect blocked by TERMINUS: {}", reason),
+            })
+            .to_string());
+        }
 
         redirects_followed += 1;
         if redirects_followed > FETCH_REDIRECT_LIMIT {
@@ -2900,8 +2932,26 @@ async fn stealth_fetch_all(
     let mut current_method = method;
     let mut current_body = body;
     let mut redirects_followed: usize = 0;
+    let mut previous_url = String::new();
 
     let (status, resp_headers, resp_bytes): (u16, HashMap<String, String>, Vec<u8>) = loop {
+        if let Err(reason) = gate_js_fetch(
+            &current_url,
+            &current_body,
+            if redirects_followed == 0 {
+                None
+            } else {
+                Some(&previous_url)
+            },
+        ) {
+            return Ok(serde_json::json!({
+                "status": 0, "body": "", "url": current_url, "headers": {},
+                "blocked": true,
+                "error": reason,
+            })
+            .to_string());
+        }
+
         let parsed_current = match url::Url::parse(&current_url) {
             Ok(u) => u,
             Err(_) => {
@@ -2954,6 +3004,14 @@ async fn stealth_fetch_all(
             })
             .to_string());
         }
+        if let Err(reason) = gate_js_fetch(next_url.as_str(), &current_body, Some(&current_url)) {
+            return Ok(serde_json::json!({
+                "status": 0, "body": "", "url": next_url.to_string(), "headers": {},
+                "blocked": true,
+                "error": format!("Redirect blocked by TERMINUS: {}", reason),
+            })
+            .to_string());
+        }
         redirects_followed += 1;
         if redirects_followed > FETCH_REDIRECT_LIMIT {
             return Ok(serde_json::json!({
@@ -2968,6 +3026,7 @@ async fn stealth_fetch_all(
             current_method = "GET".to_string();
             current_body.clear();
         }
+        previous_url = current_url.clone();
         current_url = next_url.to_string();
     };
 
@@ -3622,6 +3681,21 @@ mod tests {
         let width = geometry.document_rect(box_node).unwrap().width;
         assert!((width - 60.0).abs() < 0.1, "sampled width was {width}");
     }
+}
+
+fn gate_js_fetch(url: &str, body: &[u8], from_url: Option<&str>) -> Result<(), String> {
+    std::env::set_var("OMNIS_GLASS_HTTP_ACTION", "script-fetch");
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid fetch url: {e}"))?;
+    if let Some(from) = from_url {
+        glass_govern::gate_redirect_destination(from, url, "js")
+            .map_err(|e| format!("Redirect blocked: {e}"))?;
+    }
+    glass_govern::gate_http_outbound(
+        &parsed,
+        if body.is_empty() { None } else { Some(body) },
+        glass_govern::HttpGateAction::ScriptFetch,
+        "js",
+    )
 }
 
 fn validate_fetch_url(url: &url::Url, allow_private_network: bool) -> Result<(), String> {

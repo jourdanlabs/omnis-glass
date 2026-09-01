@@ -1182,7 +1182,7 @@ async fn run_fetch(
         DumpFormat::Html => dump_html(&page),
         DumpFormat::Text => dump_text(&mut page),
         DumpFormat::Links => dump_links(&page),
-        DumpFormat::Markdown => dump_markdown(&mut page),
+        DumpFormat::Markdown => dump_markdown(&mut page)?,
         DumpFormat::Assets => dump_assets(&page),
         DumpFormat::Cookies => dump_cookies(&page),
         // Handled above via the short-circuit branch; unreachable here.
@@ -1225,6 +1225,14 @@ async fn fetch_original_response(
     if stealth && url.scheme() != "file" {
         #[cfg(feature = "stealth")]
         {
+            if let Err(reason) = glass_govern::gate_http_outbound(
+                &url,
+                None,
+                glass_govern::HttpGateAction::DumpOriginal,
+                "dump-original",
+            ) {
+                anyhow::bail!("{reason}");
+            }
             let client = obscura_net::StealthHttpClient::with_proxy(
                 Arc::new(obscura_net::CookieJar::new()),
                 proxy.as_deref(),
@@ -1506,9 +1514,20 @@ fn dump_text(page: &mut Page) -> String {
     .unwrap_or_default()
 }
 
-fn dump_markdown(page: &mut Page) -> String {
+fn dump_markdown(page: &mut Page) -> anyhow::Result<String> {
+    use glass_govern::gate_browser_action;
+    use glass_terminus::BrowserAction;
+    use serde_json::json;
+    let url = page.url_string();
+    gate_browser_action(
+        BrowserAction::Eval,
+        &url,
+        Some(json!({"script": "cli-markdown-dump"})),
+        "cli",
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     let result = page.evaluate(obscura_browser::HTML_TO_MARKDOWN_JS);
-    result.as_str().unwrap_or_default().to_string()
+    Ok(result.as_str().unwrap_or_default().to_string())
 }
 
 fn extract_readable_text(dom: &obscura_dom::DomTree, node_id: obscura_dom::NodeId) -> String {
@@ -2234,6 +2253,35 @@ mod tests {
         let _ = tokio::fs::remove_file(&path).await;
 
         assert_eq!(bytes, PNG_BYTES, "stealth=true must not change file:// handling");
+    }
+
+    fn glass_test_env(dir: &std::path::Path) {
+        std::env::set_var("OMNIS_GLASS_STATE_DIR", dir);
+        std::env::set_var(
+            "TERMINUS_AUTHORIZE",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/terminus-authorize.mjs"),
+        );
+        std::env::set_var("OMNIS_GLASS_LANE", "browse:research");
+        std::env::set_var("OMNIS_GLASS_ENFORCE", "enforce");
+    }
+
+    /// A13 surface: `--dump original --stealth` must TERMINUS-gate before wreq send.
+    #[cfg(feature = "stealth")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_original_stealth_refuses_disallowed_host() {
+        let dir = std::env::temp_dir().join(format!(
+            "omnis-glass-a13-stealth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        glass_test_env(&dir);
+        let err = fetch_original_bytes("https://evil.example/data", None, None, 5, true).await;
+        assert!(err.is_err(), "stealth dump-original must REFUSE disallowed host");
+        assert!(
+            err.unwrap_err().to_string().contains("TERMINUS"),
+            "refusal must come from TERMINUS"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1,25 +1,35 @@
 #!/usr/bin/env node
-// Tree-wide bypass guard — flags agent-facing ungoverned egress only.
+// Tree-wide bypass guard — flags ungoverned agent-facing Page/HTTP egress.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const ROOT = join(import.meta.dirname, '..');
 const EXEMPT = JSON.parse(
-  readFileSync(join(ROOT, 'scripts/cdp-dispatch-exemptions.json'), 'utf8'),
+  readFileSync(join(ROOT, 'scripts/agent-surface-exemptions.json'), 'utf8'),
 );
 
-/** Paths where Page ops are post-ALLOW CDP domain execution or engine internals. */
-function isPostGatePath(rel) {
-  return (
-    rel.startsWith('crates/obscura-cdp/src/domains/') ||
-    rel.startsWith('crates/obscura-cdp/src/server.rs') ||
-    rel.startsWith('crates/obscura-browser/') ||
-    rel.startsWith('crates/obscura-js/') ||
-    rel.startsWith('crates/obscura-dom/') ||
-    rel.startsWith('crates/obscura-render/') ||
-    rel === 'crates/obscura/src/page.rs'
-  );
-}
+const SCAN_ROOTS = [
+  'crates/obscura-mcp/src',
+  'crates/obscura-js/src/ops.rs',
+  'crates/obscura-cli/src/main.rs',
+];
+
+const CALL_PATTERNS = [
+  { name: 'navigate_with_wait', re: /\b(?:page|state\.page_mut\(\))\.navigate_with_wait\s*\(/ },
+  { name: 'page.evaluate', re: /\b(?:page|state\.page_mut\(\))\.evaluate\s*\(/ },
+  { name: 'StealthHttpClient::fetch', re: /StealthHttpClient::[\w:]*fetch\s*\(/ },
+  { name: 'cached_request_client', re: /\bcached_request_client\s*\(/ },
+];
+
+const GATE_MARKERS = [
+  'gate_mcp_',
+  'gated_navigate',
+  'gated_evaluate',
+  'gate_js_fetch',
+  'gate_http_outbound',
+  'gate_browser_action',
+  'glass_govern::',
+];
 
 function walk(dir, out = []) {
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
@@ -34,43 +44,75 @@ function walk(dir, out = []) {
   return out;
 }
 
-const AGENT_FACING = [
-  'crates/obscura-mcp/src/lib.rs',
-  'crates/obscura-cli/src/main.rs',
-  'crates/obscura-cli/src/worker.rs', // CDP serve worker — governance via dispatch.rs
-];
+function isExempt(rel, lineNo, patternName) {
+  if (rel === 'crates/obscura-mcp/src/page_gate.rs') return true;
+  for (const entry of EXEMPT.entries || []) {
+    if (entry.file === rel && entry.pattern === patternName) {
+      if (entry.lines && !entry.lines.includes(lineNo)) continue;
+      return true;
+    }
+  }
+  for (const f of EXEMPT.files || []) {
+    if (f === rel) return true;
+  }
+  return false;
+}
+
+function stripTestModules(src) {
+  const marker = '#[cfg(test)]';
+  const idx = src.indexOf(marker);
+  return idx >= 0 ? src.slice(0, idx) : src;
+}
+
+function governedNear(lines, lineIdx, window = 80) {
+  const start = Math.max(0, lineIdx - window);
+  const slice = lines.slice(start, lineIdx + 1).join('\n');
+  return GATE_MARKERS.some((m) => slice.includes(m));
+}
+
+function collectFiles() {
+  const files = new Set();
+  for (const root of SCAN_ROOTS) {
+    const abs = join(ROOT, root);
+    if (root.endsWith('.rs')) {
+      files.add(abs);
+      continue;
+    }
+    try {
+      for (const f of walk(abs)) files.add(f);
+    } catch {
+      // optional path
+    }
+  }
+  return [...files];
+}
 
 const violations = [];
-const patterns = [
-  /\bpage\.navigate_with_wait\s*\(/,
-  /\bPage::navigate_with_wait\s*\(/,
-  /\bpage\.evaluate\s*\(/,
-  /\bObscuraHttpClient::/,
-];
 
-for (const rel of AGENT_FACING) {
-  const file = join(ROOT, rel);
-  let src;
-  try {
-    src = readFileSync(file, 'utf8');
-  } catch {
-    continue;
+for (const file of collectFiles()) {
+  const rel = relative(ROOT, file);
+  let src = readFileSync(file, 'utf8');
+  if (rel === 'crates/obscura-mcp/src/lib.rs') {
+    src = stripTestModules(src);
   }
-  const governed =
-    src.includes('glass_govern::') ||
-    src.includes('gate_browser_action') ||
-    src.includes('gate_mcp_') ||
-    src.includes('OMNIS_GLASS_HTTP_ACTION') ||
-    src.includes('obscura_cdp::') ||
-    rel.includes('worker.rs');
-  if (!governed) {
-    violations.push({ file: rel, pattern: 'missing glass_govern markers' });
+  const lines = src.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNo = i + 1;
+    for (const { name, re } of CALL_PATTERNS) {
+      if (!re.test(line)) continue;
+      if (isExempt(rel, lineNo, name)) continue;
+      if (governedNear(lines, i)) continue;
+      violations.push({ file: rel, line: lineNo, pattern: name, text: line.trim() });
+    }
   }
 }
 
 if (violations.length) {
-  console.error('check-cdp-bypass: agent-facing paths missing governance:');
-  for (const v of violations) console.error(`  ${v.file} (${v.pattern})`);
+  console.error('check-cdp-bypass: ungoverned agent-surface calls:');
+  for (const v of violations) {
+    console.error(`  ${v.file}:${v.line} [${v.pattern}] ${v.text}`);
+  }
   process.exit(1);
 }
 console.log('check-cdp-bypass: OK');

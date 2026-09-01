@@ -72,11 +72,17 @@ impl TerminusGate {
 
         let lane = std::env::var("OMNIS_GLASS_LANE").unwrap_or_else(|_| "browse:research".into());
 
+        let allow_private = std::env::var("OBSCURA_ALLOW_PRIVATE_NETWORK")
+            .ok()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+
         Self {
             policy: policy.clone(),
             lane,
             enforce: EnforceMode::from_env(),
-            ssrf: SsrfCheck::default(),
+            ssrf: SsrfCheck {
+                allow_private,
+            },
             state_dir: state_dir.to_path_buf(),
             authorize_script,
         }
@@ -105,6 +111,14 @@ impl TerminusGate {
         // SSRF before lane/host — literal and DNS-resolved private addresses
         if let Some(ssrf) = self.check_ssrf(&envelope.target.url) {
             return ssrf;
+        }
+
+        if self.enforce == EnforceMode::LocalOnly {
+            return GateVerdict {
+                verdict: "ALLOW".into(),
+                decision: "PERMIT".into(),
+                reason: "local_only".into(),
+            };
         }
 
         if !self.policy.valid {
@@ -141,14 +155,6 @@ impl TerminusGate {
                     "action '{}' not permitted on lane '{}'",
                     envelope.action, envelope.lane
                 ),
-            };
-        }
-
-        if self.enforce == EnforceMode::LocalOnly {
-            return GateVerdict {
-                verdict: "ALLOW".into(),
-                decision: "PERMIT".into(),
-                reason: "local_only".into(),
             };
         }
 

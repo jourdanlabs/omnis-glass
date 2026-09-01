@@ -5,6 +5,7 @@
 
 pub mod http;
 pub mod glass;
+pub mod page_gate;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -91,6 +92,14 @@ impl BrowserState {
             console_messages: Vec::new(),
             interactive_refs: HashMap::new(),
         }
+    }
+
+    /// Test-only: seed the active tab's history stack for acceptance tests.
+    #[doc(hidden)]
+    pub fn test_seed_page_history(&mut self, urls: Vec<String>, index: usize) {
+        let page = self.page_mut();
+        page.history = urls;
+        page.set_history_index(index);
     }
 
     /// Make sure there is at least one tab and return a &mut to the
@@ -762,7 +771,30 @@ async fn handle_tool_call(id: Value, params: &Value, state: &mut BrowserState) -
         }
     }
 
-    let result = match name {
+    let result = dispatch_tool(name, args, state).await;
+
+    match result {
+        Ok(content) => {
+            let page_url = state.page_url();
+            if glass::tool_returns_provenance(name) {
+                RpcResponse::ok(id, glass::wrap_text_result(&content, &page_url))
+            } else {
+                RpcResponse::ok(id, json!({
+                    "content": [{ "type": "text", "text": content }]
+                }))
+            }
+        }
+        Err(e) => RpcResponse::ok(id, glass::wrap_error(e)),
+    }
+}
+
+/// Production MCP tool dispatch — used by JSON-RPC and acceptance tests.
+pub async fn dispatch_tool(
+    name: &str,
+    args: &Value,
+    state: &mut BrowserState,
+) -> Result<String, String> {
+    match name {
         "browser_navigate" => tool_navigate(args, state).await,
         "browser_snapshot" => tool_snapshot(args, state),
         "browser_click" => tool_click(args, state).await,
@@ -775,7 +807,6 @@ async fn handle_tool_call(id: Value, params: &Value, state: &mut BrowserState) -
         "browser_network_requests" => tool_network_requests(state),
         "browser_console_messages" => tool_console_messages(state),
         "browser_close" => tool_close(state),
-        // Tier 1 agent-UX additions
         "browser_markdown" => tool_markdown(args, state),
         "browser_links" => tool_links(args, state),
         "browser_interactive_elements" => tool_interactive_elements(args, state),
@@ -786,7 +817,6 @@ async fn handle_tool_call(id: Value, params: &Value, state: &mut BrowserState) -
         "browser_set_cookie" => tool_set_cookie(args, state),
         "browser_clear_cookies" => tool_clear_cookies(state),
         "browser_wait_for_text" => tool_wait_for_text(args, state).await,
-        // Tier 2 agent-UX additions
         "browser_detect_forms" => tool_detect_forms(state),
         "browser_fill_form" => tool_fill_form(args, state),
         "browser_scroll" => tool_scroll(args, state),
@@ -801,26 +831,6 @@ async fn handle_tool_call(id: Value, params: &Value, state: &mut BrowserState) -
         "browser_storage_state" => tool_storage_state(state),
         "browser_set_storage_state" => tool_set_storage_state(args, state),
         _ => Err(format!("Unknown tool: {name}")),
-    };
-
-    match result {
-        Ok(content) => {
-            let page_url = state.page_url();
-            let provenance_tools = [
-                "browser_snapshot",
-                "browser_markdown",
-                "browser_extract",
-                "browser_links",
-            ];
-            if provenance_tools.contains(&name) {
-                RpcResponse::ok(id, glass::wrap_text_result(&content, &page_url))
-            } else {
-                RpcResponse::ok(id, json!({
-                    "content": [{ "type": "text", "text": content }]
-                }))
-            }
-        }
-        Err(e) => RpcResponse::ok(id, glass::wrap_error(e)),
     }
 }
 
@@ -951,7 +961,6 @@ fn truncate(text: &str, max_chars: usize) -> String {
 async fn tool_navigate(args: &Value, state: &mut BrowserState) -> Result<String, String> {
     let url = args.get("url").and_then(Value::as_str)
         .ok_or("Missing url parameter")?;
-    glass::gate_mcp_navigate(url)?;
     let wait_until = args.get("waitUntil").and_then(Value::as_str).unwrap_or("load");
 
     let condition = obscura_browser::lifecycle::WaitUntil::from_str(wait_until);
@@ -961,8 +970,7 @@ async fn tool_navigate(args: &Value, state: &mut BrowserState) -> Result<String,
         page.http_client.set_user_agent(ua).await;
     }
 
-    page.navigate_with_wait(url, condition).await
-        .map_err(|e| e.to_string())?;
+    page_gate::gated_navigate(page, url, condition).await?;
 
     let summary = format!("Navigated to {} — \"{}\"", page.url_string(), page.title);
     // DOM changed — invalidate the ref table. Next snapshot will rebuild.
@@ -1014,7 +1022,7 @@ async fn tool_click(args: &Value, state: &mut BrowserState) -> Result<String, St
         sel = serde_json::to_string(&selector).unwrap()
     );
 
-    let result = state.page_mut().evaluate(&js);
+    let result = page_gate::gated_evaluate(state.page_mut(), &js, &page_url)?;
     if result.as_str() == Some("error:element not found") {
         Err(format!("Element not found: {selector}"))
     } else {
@@ -1046,7 +1054,7 @@ async fn tool_fill(args: &Value, state: &mut BrowserState) -> Result<String, Str
         val = serde_json::to_string(value).unwrap()
     );
 
-    let result = state.page_mut().evaluate(&js);
+    let result = page_gate::gated_evaluate(state.page_mut(), &js, &page_url)?;
     if result.as_str() == Some("error:element not found") {
         Err(format!("Element not found: {selector}"))
     } else {
@@ -1074,7 +1082,7 @@ async fn tool_type(args: &Value, state: &mut BrowserState) -> Result<String, Str
         txt = serde_json::to_string(text).unwrap()
     );
 
-    let result = state.page_mut().evaluate(&js);
+    let result = page_gate::gated_evaluate(state.page_mut(), &js, &page_url)?;
     if result.as_str() == Some("error:element not found") {
         Err(format!("Element not found: {selector}"))
     } else {
@@ -1105,7 +1113,7 @@ async fn tool_press_key(args: &Value, state: &mut BrowserState) -> Result<String
         key = serde_json::to_string(key).unwrap()
     );
 
-    state.page_mut().evaluate(&js);
+    page_gate::gated_evaluate_state(state, &js)?;
     state.settle_synthetic_navigation().await?;
     Ok(format!("Pressed key '{key}'"))
 }
@@ -1131,7 +1139,7 @@ fn tool_select_option(args: &Value, state: &mut BrowserState) -> Result<String, 
         val = serde_json::to_string(value).unwrap()
     );
 
-    let result = state.page_mut().evaluate(&js);
+    let result = page_gate::gated_evaluate_state(state, &js)?;
     match result.as_str() {
         Some("error:element not found") => Err(format!("Element not found: {selector}")),
         Some("error:option not found") => Err(format!("Option not found: {value}")),
@@ -1142,10 +1150,8 @@ fn tool_select_option(args: &Value, state: &mut BrowserState) -> Result<String, 
 async fn tool_evaluate(args: &Value, state: &mut BrowserState) -> Result<String, String> {
     let expression = args.get("expression").and_then(Value::as_str)
         .ok_or("Missing expression parameter")?;
-    let page_url = state.page_url();
-    glass::gate_mcp_eval(expression, &page_url)?;
 
-    let result = state.page_mut().evaluate(expression);
+    let result = page_gate::gated_evaluate_state(state, expression)?;
     state.settle_synthetic_navigation().await?;
     Ok(match &result {
         Value::String(s) => s.clone(),
@@ -1234,8 +1240,7 @@ fn tool_close(state: &mut BrowserState) -> Result<String, String> {
 fn tool_markdown(args: &Value, state: &mut BrowserState) -> Result<String, String> {
     let max_chars = args.get("max_chars").and_then(Value::as_u64).map(|n| n as usize)
         .unwrap_or(DEFAULT_TEXT_LIMIT);
-    let page = state.page_mut();
-    let result = page.evaluate(obscura_browser::HTML_TO_MARKDOWN_JS);
+    let result = page_gate::gated_evaluate_state(state, obscura_browser::HTML_TO_MARKDOWN_JS)?;
     let md = result.as_str().unwrap_or_default();
     Ok(truncate(md, max_chars))
 }
@@ -1245,8 +1250,7 @@ fn tool_markdown(args: &Value, state: &mut BrowserState) -> Result<String, Strin
 fn tool_links(args: &Value, state: &mut BrowserState) -> Result<String, String> {
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
     let internal_only = args.get("internal_only").and_then(Value::as_bool).unwrap_or(false);
-    let page = state.page_mut();
-    let base_origin = url::Url::parse(&page.url_string())
+    let base_origin = url::Url::parse(&state.page_url())
         .ok()
         .map(|u| u.origin())
         .unwrap_or_else(|| url::Url::parse("about:blank").unwrap().origin());
@@ -1266,7 +1270,7 @@ fn tool_links(args: &Value, state: &mut BrowserState) -> Result<String, String> 
         }
         return out;
     })()"#;
-    let val = page.evaluate(js);
+    let val = page_gate::gated_evaluate_state(state, js)?;
     let arr = val.as_array().cloned().unwrap_or_default();
     let lines: Vec<String> = arr.into_iter()
         .filter(|item| {
@@ -1296,7 +1300,6 @@ fn tool_interactive_elements(args: &Value, state: &mut BrowserState) -> Result<S
     if state.interactive_refs.is_empty() {
         return Ok("No interactive elements on this page.".to_string());
     }
-    let page = state.page_mut();
     let js = format!(r#"(function(){{
         var els = document.querySelectorAll('[data-obscura-ref]');
         var out = [];
@@ -1316,7 +1319,7 @@ fn tool_interactive_elements(args: &Value, state: &mut BrowserState) -> Result<S
         }}
         return out;
     }})()"#);
-    let val = page.evaluate(&js);
+    let val = page_gate::gated_evaluate_state(state, &js)?;
     let arr = val.as_array().cloned().unwrap_or_default();
     let lines: Vec<String> = arr.into_iter().map(|item| {
         let r = item.get("ref").and_then(|v| v.as_str()).unwrap_or("?");
@@ -1338,7 +1341,6 @@ fn tool_interactive_elements(args: &Value, state: &mut BrowserState) -> Result<S
 /// agent always sees fresh refs.
 fn rebuild_interactive_refs(state: &mut BrowserState) -> Result<(), String> {
     state.interactive_refs.clear();
-    let page = state.page_mut();
     // Tag every interactable with data-obscura-ref="eN" in DOM order.
     let tag_js = r#"(function(){
         var sel = 'a[href], button, input:not([type=hidden]), select, textarea, [role=button], [role=link], [role=checkbox], [role=tab], [role=menuitem], [role=option], [onclick], [tabindex]:not([tabindex="-1"])';
@@ -1351,7 +1353,7 @@ fn rebuild_interactive_refs(state: &mut BrowserState) -> Result<(), String> {
         }
         return refs;
     })()"#;
-    let val = page.evaluate(tag_js);
+    let val = page_gate::gated_evaluate_state(state, tag_js)?;
     let refs: Vec<String> = val.as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
@@ -1368,52 +1370,58 @@ fn rebuild_interactive_refs(state: &mut BrowserState) -> Result<(), String> {
 }
 
 async fn tool_back(state: &mut BrowserState) -> Result<String, String> {
-    let history_url = state.page_mut().with_dom(|_| ()).map(|_| ());
-    let _ = history_url;
-    // We track simple page history on the Page itself; navigate to the
-    // entry before the cursor.
-    let page = state.page_mut();
-    if page.history.len() < 2 || page.history_index == 0 {
-        return Err("No previous page in history.".to_string());
-    }
-    let prev_idx = page.history_index - 1;
-    let url = page.history[prev_idx].clone();
-    page.set_history_index(prev_idx);
+    let (url, stash) = {
+        let page = state.page_mut();
+        if page.history.len() < 2 || page.history_index == 0 {
+            return Err("No previous page in history.".to_string());
+        }
+        let prev_idx = page.history_index - 1;
+        let url = page.history[prev_idx].clone();
+        page.set_history_index(prev_idx);
+        let stash = (page.history.clone(), page.history_index);
+        (url, stash)
+    };
     let condition = obscura_browser::lifecycle::WaitUntil::DomContentLoaded;
-    let stash = (page.history.clone(), page.history_index);
-    page.navigate_with_wait(&url, condition).await.map_err(|e| e.to_string())?;
-    let page = state.page_mut();
-    page.history = stash.0;
-    page.history_index = stash.1;
+    page_gate::gated_navigate(state.page_mut(), &url, condition).await?;
+    {
+        let page = state.page_mut();
+        page.history = stash.0;
+        page.history_index = stash.1;
+    }
     state.interactive_refs.clear();
     Ok(format!("Back to {url}"))
 }
 
 async fn tool_forward(state: &mut BrowserState) -> Result<String, String> {
-    let page = state.page_mut();
-    if page.history_index + 1 >= page.history.len() {
-        return Err("No forward page in history.".to_string());
-    }
-    let next_idx = page.history_index + 1;
-    let url = page.history[next_idx].clone();
-    page.set_history_index(next_idx);
+    let (url, stash) = {
+        let page = state.page_mut();
+        if page.history_index + 1 >= page.history.len() {
+            return Err("No forward page in history.".to_string());
+        }
+        let next_idx = page.history_index + 1;
+        let url = page.history[next_idx].clone();
+        page.set_history_index(next_idx);
+        let stash = (page.history.clone(), page.history_index);
+        (url, stash)
+    };
     let condition = obscura_browser::lifecycle::WaitUntil::DomContentLoaded;
-    let stash = (page.history.clone(), page.history_index);
-    page.navigate_with_wait(&url, condition).await.map_err(|e| e.to_string())?;
-    let page = state.page_mut();
-    page.history = stash.0;
-    page.history_index = stash.1;
+    page_gate::gated_navigate(state.page_mut(), &url, condition).await?;
+    {
+        let page = state.page_mut();
+        page.history = stash.0;
+        page.history_index = stash.1;
+    }
     state.interactive_refs.clear();
     Ok(format!("Forward to {url}"))
 }
 
 async fn tool_reload(state: &mut BrowserState) -> Result<String, String> {
-    let url = state.page_mut().url_string();
+    let url = state.page_url();
     if url == "about:blank" {
         return Err("Nothing to reload.".to_string());
     }
     let condition = obscura_browser::lifecycle::WaitUntil::DomContentLoaded;
-    state.page_mut().navigate_with_wait(&url, condition).await.map_err(|e| e.to_string())?;
+    page_gate::gated_navigate(state.page_mut(), &url, condition).await?;
     state.interactive_refs.clear();
     Ok(format!("Reloaded {url}"))
 }
@@ -1483,7 +1491,7 @@ async fn tool_wait_for_text(args: &Value, state: &mut BrowserState) -> Result<St
     // Exponential backoff like browser_wait_for (see comment there).
     let mut tick_ms: u64 = 5;
     loop {
-        let found = state.page_mut().evaluate(&js).as_bool().unwrap_or(false);
+        let found = page_gate::gated_evaluate_state(state, &js)?.as_bool().unwrap_or(false);
         if found {
             return Ok(format!("Found text {needle:?}"));
         }
@@ -1508,7 +1516,6 @@ async fn tool_wait_for_text(args: &Value, state: &mut BrowserState) -> Result<St
 /// current value, and any visible label text. Agents call this to
 /// understand a form's shape before filling it.
 fn tool_detect_forms(state: &mut BrowserState) -> Result<String, String> {
-    let page = state.page_mut();
     let js = r#"(function(){
         var forms = document.querySelectorAll('form');
         var out = [];
@@ -1559,7 +1566,7 @@ fn tool_detect_forms(state: &mut BrowserState) -> Result<String, String> {
         }
         return out;
     })()"#;
-    let val = page.evaluate(js);
+    let val = page_gate::gated_evaluate_state(state, js)?;
     if val.is_null() {
         return Ok("No forms found.".to_string());
     }
@@ -1627,7 +1634,7 @@ fn tool_fill_form(args: &Value, state: &mut BrowserState) -> Result<String, Stri
                 return "ok";
             }})()"#, sel = serde_json::to_string(&selector).unwrap(), val = serde_json::to_string(value).unwrap()),
         };
-        let res = state.page_mut().evaluate(&js);
+        let res = page_gate::gated_evaluate_state(state, &js)?;
         match res.as_str() {
             Some("ok") => filled += 1,
             Some(e) => errors.push(format!("{selector}: {e}")),
@@ -1650,7 +1657,7 @@ fn tool_fill_form(args: &Value, state: &mut BrowserState) -> Result<String, Stri
             el.click();
             return "ok";
         }})()"#, sel = serde_json::to_string(&sel).unwrap());
-        let _ = state.page_mut().evaluate(&js);
+        page_gate::gated_evaluate_state(state, &js)?;
         state.interactive_refs.clear();
     }
 
@@ -1677,7 +1684,7 @@ fn tool_scroll(args: &Value, state: &mut BrowserState) -> Result<String, String>
             el.scrollIntoView({{behavior:'instant', block:'center'}});
             return JSON.stringify({{x: window.scrollX, y: window.scrollY}});
         }})()"#, sel = serde_json::to_string(&selector).unwrap());
-        let res = state.page_mut().evaluate(&js);
+        let res = page_gate::gated_evaluate_state(state, &js)?;
         if res.as_str() == Some("error:not found") {
             return Err(format!("Element not found: {selector}"));
         }
@@ -1706,7 +1713,7 @@ fn tool_scroll(args: &Value, state: &mut BrowserState) -> Result<String, String>
         dir = serde_json::to_string(direction).unwrap(),
         amt = amt,
     );
-    let res = state.page_mut().evaluate(&js);
+    let res = page_gate::gated_evaluate_state(state, &js)?;
     // A scroll can reveal new DOM (infinite scroll); invalidate refs.
     state.interactive_refs.clear();
     Ok(format!("Scrolled {direction}. {}", res.as_str().unwrap_or("")))
@@ -1726,7 +1733,7 @@ fn tool_get_attribute(args: &Value, state: &mut BrowserState) -> Result<String, 
         sel = serde_json::to_string(&selector).unwrap(),
         a = serde_json::to_string(attr).unwrap(),
     );
-    let res = state.page_mut().evaluate(&js);
+    let res = page_gate::gated_evaluate_state(state, &js)?;
     if res.is_null() {
         return Err(format!("Element not found: {selector}"));
     }
@@ -1740,7 +1747,7 @@ fn tool_count(args: &Value, state: &mut BrowserState) -> Result<String, String> 
         "document.querySelectorAll({sel}).length",
         sel = serde_json::to_string(selector).unwrap()
     );
-    let res = state.page_mut().evaluate(&js);
+    let res = page_gate::gated_evaluate_state(state, &js)?;
     // V8 numbers come back as f64 even when they are integer-valued; as_u64
     // returns None for f64 in serde_json, so coerce via f64.
     let n = res.as_u64()
@@ -1790,7 +1797,7 @@ fn tool_extract(args: &Value, state: &mut BrowserState) -> Result<String, String
         }}
         return out;
     }})()"#, schema = schema_json);
-    let res = state.page_mut().evaluate(&js);
+    let res = page_gate::gated_evaluate_state(state, &js)?;
     serde_json::to_string_pretty(&res).map_err(|e| e.to_string())
 }
 
@@ -1803,8 +1810,12 @@ async fn tool_tab_new(args: &Value, state: &mut BrowserState) -> Result<String, 
         if let Some(ref ua) = ua {
             page.http_client.set_user_agent(ua).await;
         }
-        page.navigate_with_wait(u, obscura_browser::lifecycle::WaitUntil::DomContentLoaded)
-            .await.map_err(|e| e.to_string())?;
+        page_gate::gated_navigate(
+            page,
+            u,
+            obscura_browser::lifecycle::WaitUntil::DomContentLoaded,
+        )
+        .await?;
         Ok(format!("Opened {id} and navigated to {}", page.url_string()))
     } else {
         Ok(format!("Opened {id} (about:blank)."))
@@ -1987,7 +1998,7 @@ fn tool_storage_state(state: &mut BrowserState) -> Result<String, String> {
         return { origin: location.origin || '', localStorage: ls, sessionStorage: ss };
     })()"#;
     let storage = if state.active_tab.is_some() {
-        state.page_mut().evaluate(storage_js)
+        page_gate::gated_evaluate_state(state, storage_js)?
     } else {
         Value::Null
     };
@@ -2056,7 +2067,7 @@ fn tool_set_storage_state(args: &Value, state: &mut BrowserState) -> Result<Stri
                     }
                 }
                 if !snippets.is_empty() {
-                    let _ = state.page_mut().evaluate(&snippets.join("\n"));
+                    page_gate::gated_evaluate_state(state, &snippets.join("\n"))?;
                 }
             }
         }
@@ -2067,6 +2078,21 @@ fn tool_set_storage_state(args: &Value, state: &mut BrowserState) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mcp_glass_test_env() {
+        let dir = std::env::temp_dir().join(format!("obscura-mcp-glass-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("OMNIS_GLASS_STATE_DIR", dir);
+        std::env::set_var(
+            "TERMINUS_AUTHORIZE",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/terminus-authorize.mjs"
+            ),
+        );
+        std::env::set_var("OMNIS_GLASS_LANE", "browse:research");
+        std::env::set_var("OMNIS_GLASS_ENFORCE", "local_only");
+    }
 
     fn listed_tools() -> Vec<Value> {
         handle_tools_list(json!(1)).result.expect("tools/list result")
@@ -2207,6 +2233,7 @@ mod tests {
         // refuses by default, exactly as the issue reporter had to pass
         // --allow-private-network to run their repro.
         std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        mcp_glass_test_env();
         let (base, requests) = spawn_form_recording_server();
         let mut state = BrowserState::new(None, None, false);
         state
@@ -2243,6 +2270,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fill_tools_notify_controlled_input_tracker() {
+        mcp_glass_test_env();
         let mut state = BrowserState::new(None, None, false);
         state
             .page_mut()
@@ -2318,6 +2346,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fill_form_check_and_select_use_native_setter_and_trusted_events() {
+        mcp_glass_test_env();
         let mut state = BrowserState::new(None, None, false);
         state
             .page_mut()

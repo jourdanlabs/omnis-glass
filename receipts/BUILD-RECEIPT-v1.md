@@ -25,8 +25,10 @@
 | `glass-govern` | shared gate for CDP / MCP / CLI / HTTP |
 | CDP chokepoint | `obscura-cdp/src/dispatch.rs` → `gate_cdp_command()` |
 | HTTP client gate | `obscura-net/src/client.rs` → `gate_http_outbound` (A13) |
-| MCP governed path | `obscura-mcp/src/glass.rs` |
-| CLI governed path | `obscura-cli/src/main.rs` (fetch + scrape + eval) |
+| MCP governed path | `obscura-mcp/src/page_gate.rs` — all `navigate_with_wait` / `evaluate` via TERMINUS |
+| CLI governed path | `obscura-cli/src/main.rs` (fetch + scrape + eval + stealth dump-original) |
+| JS fetch gate | `obscura-js/src/ops.rs` → `gate_js_fetch` before `op_fetch_url` send |
+| Agent-surface lint | `scripts/check-cdp-bypass.mjs` (call-site scanner + `agent-surface-exemptions.json`) |
 | Bin | `omnis-glass` (+ `obscura` compat) |
 | Receipts subcommand | `omnis-glass receipts verify\|status` |
 
@@ -46,9 +48,9 @@
 | A10 | PASS | release binary + CDP bypass + receipts status |
 | A11 | PASS | invalid lane YAML → boot ok, all governed REFUSE |
 | A12 | PASS | cross-origin redirect strips Authorization; cookie jar domain isolation |
-| A13 | PASS | script-fetch + dump-original REFUSE at HTTP boundary |
-| A14 | PASS | MCP navigate disallowed host → REFUSE |
-| A15 | PASS | MCP content tools carry `provenance.content_sha256` + `capture_kind: live` |
+| A13 | PASS | `op_fetch_url` page fetch + `gate_http_outbound` boundary + `--dump original --stealth` REFUSE |
+| A14 | PASS | `browser_tab_new` / `browser_back` disallowed host → REFUSE (tool surface) |
+| A15 | PASS | all content-returning MCP tools carry provenance + `capture_kind: live` |
 
 ```
 cargo test -p glass-terminus

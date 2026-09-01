@@ -22,6 +22,7 @@ deno_core = "0.350"
 [dependencies]
 obscura-dom = { workspace = true }
 obscura-net = { workspace = true }
+glass-govern = { workspace = true }
 deno_core = "0.350"
 tokio = { workspace = true }
 serde = { workspace = true }

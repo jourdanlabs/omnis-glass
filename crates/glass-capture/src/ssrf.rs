@@ -27,6 +27,9 @@ impl SsrfCheck {
         };
 
         let scheme = parsed.scheme();
+        if scheme == "about" || scheme == "data" {
+            return SsrfVerdict::Allow;
+        }
         if scheme != "http" && scheme != "https" {
             if scheme == "file" {
                 return SsrfVerdict::Allow;

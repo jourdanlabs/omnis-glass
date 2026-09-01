@@ -63,6 +63,33 @@ pub fn wrap_error(text: String) -> Value {
     })
 }
 
+/// Content-returning MCP tools get provenance + live capture (spec 2b).
+pub fn tool_returns_provenance(tool_name: &str) -> bool {
+    !matches!(
+        tool_name,
+        "browser_navigate"
+            | "browser_click"
+            | "browser_fill"
+            | "browser_type"
+            | "browser_press_key"
+            | "browser_select_option"
+            | "browser_wait_for"
+            | "browser_wait_for_text"
+            | "browser_close"
+            | "browser_back"
+            | "browser_forward"
+            | "browser_reload"
+            | "browser_set_cookie"
+            | "browser_clear_cookies"
+            | "browser_tab_new"
+            | "browser_tab_switch"
+            | "browser_tab_close"
+            | "browser_fill_form"
+            | "browser_scroll"
+            | "browser_set_storage_state"
+    )
+}
+
 fn chrono_like_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ms = SystemTime::now()
