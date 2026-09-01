@@ -204,6 +204,12 @@ enum Command {
         #[command(subcommand)]
         action: ReceiptsAction,
     },
+
+    /// Glass Pane — native oversight window (requires `--features render` build)
+    Pane {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -544,6 +550,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Receipts { action }) => {
             run_receipts(action)?;
         }
+        Some(Command::Pane { extra }) => {
+            run_pane(extra)?;
+        }
         None => {
             print_banner(args.port);
             if let Some(ref proxy) = args.proxy {
@@ -562,6 +571,33 @@ fn glass_state_dir(override_dir: Option<std::path::PathBuf>) -> std::path::PathB
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
             std::path::PathBuf::from(home).join(".omnis-glass")
         })
+}
+
+fn run_pane(extra: Vec<String>) -> anyhow::Result<()> {
+    if std::env::var("OMNIS_GLASS_PANE").ok().as_deref() == Some("0") {
+        anyhow::bail!("OMNIS GLASS pane disabled (OMNIS_GLASS_PANE=0)");
+    }
+    let pane_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.parent().map(|d| {
+                if cfg!(windows) {
+                    d.join("glass-pane.exe")
+                } else {
+                    d.join("glass-pane")
+                }
+            })
+        })
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("glass-pane"));
+    let status = std::process::Command::new(&pane_bin)
+        .args(extra)
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to spawn {}: {e}", pane_bin.display()))?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 fn run_receipts(action: ReceiptsAction) -> anyhow::Result<()> {

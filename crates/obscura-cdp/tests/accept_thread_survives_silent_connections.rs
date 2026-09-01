@@ -36,6 +36,8 @@ async fn pick_port() -> u16 {
 
 #[test]
 fn accept_thread_survives_silent_connections() {
+    std::env::set_var("OMNIS_GLASS_CDP_TOKEN", "accept-thread-test-token");
+    std::env::set_var("OMNIS_GLASS_CDP_AUTH", "1");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -77,7 +79,7 @@ fn accept_thread_survives_silent_connections() {
         // 1. A real WebSocket client still gets its handshake and a CDP
         //    round-trip. Before the fix this hung until the timeout because
         //    the accept thread was parked inside a blocking peek.
-        let url = format!("ws://127.0.0.1:{}/devtools/browser", ws_port);
+        let url = obscura_cdp::cdp_auth::browser_ws_url("127.0.0.1", ws_port);
         let cdp = tokio::time::timeout(Duration::from_secs(5), async {
             let (mut ws, _) = connect_async(&url).await.expect("handshake");
             ws.send(Message::Text(

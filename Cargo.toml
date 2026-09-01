@@ -14,6 +14,9 @@ members = [
     "crates/glass-capture",
     "crates/glass-terminus",
     "crates/glass-govern",
+    "crates/glass-pane-bridge",
+    "crates/glass-pane-ui",
+    "crates/glass-pane",
 ]
 
 [workspace.package]
@@ -70,6 +73,12 @@ glass-ledger = { path = "crates/glass-ledger" }
 glass-capture = { path = "crates/glass-capture" }
 glass-terminus = { path = "crates/glass-terminus" }
 glass-govern = { path = "crates/glass-govern" }
+glass-pane-bridge = { path = "crates/glass-pane-bridge" }
+glass-pane-ui = { path = "crates/glass-pane-ui" }
+wry = "0.46"
+tao = "0.30"
+include_dir = "0.7"
+subtle = "2.6"
 
 [patch.crates-io]
 # Keep the grid shrink-to-fit correction local until it lands upstream.

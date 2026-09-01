@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>OMNIS GLASS — Glass Pane</title>
+  <link rel="stylesheet" href="pane.css" />
+</head>
+<body>
+  <header>
+    <span id="mode-badge" class="badge mirror">MIRROR</span>
+    <input id="url-bar" type="text" readonly placeholder="URL" />
+    <button id="btn-take" type="button">Take control</button>
+    <button id="btn-release" type="button" hidden>Release</button>
+  </header>
+  <main>
+    <canvas id="viewport" width="1280" height="720"></canvas>
+    <aside id="rail"><h2>Actions</h2><ul id="rail-list"></ul></aside>
+  </main>
+  <script src="pane.js"></script>
+</body>
+</html>

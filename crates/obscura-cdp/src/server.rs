@@ -169,6 +169,15 @@ pub async fn start_with_serve_options_and_limit(
     allow_private_network: bool,
     max_connections: usize,
 ) -> anyhow::Result<()> {
+    let cdp_token = if crate::cdp_auth::cdp_auth_required() {
+        std::env::var("OMNIS_GLASS_CDP_TOKEN").unwrap_or_else(|_| crate::cdp_auth::generate_cdp_token())
+    } else {
+        String::new()
+    };
+    if crate::cdp_auth::cdp_auth_required() {
+        std::env::set_var("OMNIS_GLASS_CDP_TOKEN", &cdp_token);
+    }
+    let cdp_token_arc = std::sync::Arc::new(cdp_token.clone());
     let ip: std::net::IpAddr = host
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid --host '{}': {}", host, e))?;
@@ -191,9 +200,15 @@ pub async fn start_with_serve_options_and_limit(
 
     info!("Obscura CDP server listening on ws://{}:{}", host, port);
     info!(
-        "DevTools endpoint: ws://{}:{}/devtools/browser",
-        host, port
+        "DevTools endpoint: {}",
+        crate::cdp_auth::debugger_url(host, port, &cdp_token)
     );
+    if crate::cdp_auth::cdp_auth_required() {
+        eprintln!(
+            "OMNIS GLASS CDP token (required for WebSocket): {}",
+            cdp_token
+        );
+    }
     if allow_file_access {
         info!("file:// navigation enabled (--allow-file-access). Do not expose this port to untrusted networks.");
     }
@@ -226,6 +241,7 @@ pub async fn start_with_serve_options_and_limit(
     // above any real connect rate, so the kernel backlog cannot overflow
     // under a connection burst.
     let accept_flag = shutdown_flag.clone();
+    let token_for_accept = cdp_token_arc.clone();
     std::thread::Builder::new()
         .name("obscura-cdp-accept".into())
         .spawn(move || {
@@ -282,7 +298,20 @@ pub async fn start_with_serve_options_and_limit(
                         PeekStatus::NotReady => pending.push((stream, since)),
                         PeekStatus::Closed => {}
                         PeekStatus::Head(head) => {
-                            if let Err(e) = accept_dispatch(stream, port, &ws_tx, &head) {
+                            let is_json = head.contains("/json/version")
+                                || head.contains("/json/list")
+                                || head.contains("/json/protocol")
+                                || head.contains("/json HTTP")
+                                || head.contains("/json\r\n");
+                            if !is_json
+                                && !crate::cdp_auth::token_from_request_head(&head, &token_for_accept)
+                            {
+                                refuse_cdp_auth(stream);
+                                continue;
+                            }
+                            if let Err(e) =
+                                accept_dispatch(stream, port, &ws_tx, &head, &token_for_accept)
+                            {
                                 if !format!("{}", e).contains("close") {
                                     error!("Accept dispatch error: {}", e);
                                 }
@@ -666,6 +695,15 @@ fn refuse_connection(stream: std::net::TcpStream) {
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
+fn refuse_cdp_auth(mut stream: std::net::TcpStream) {
+    use std::io::Write;
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.write_all(
+        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+    let _ = stream.flush();
+}
+
 const HTTP_PEEK_BUF: usize = 4096;
 
 /// How long a freshly accepted connection may sit without sending a request
@@ -732,6 +770,7 @@ fn accept_dispatch(
     port: u16,
     ws_tx: &mpsc::Sender<std::net::TcpStream>,
     head: &str,
+    cdp_token: &str,
 ) -> anyhow::Result<()> {
     let endpoint = if head.contains("/json/version") {
         Some("version")
@@ -747,7 +786,7 @@ fn accept_dispatch(
         // The request head is already sitting in the kernel receive buffer;
         // switch back to blocking mode for the synchronous /json serve.
         let _ = stream.set_nonblocking(false);
-        return handle_http_json_blocking(stream, port, ep);
+        return handle_http_json_blocking(stream, port, ep, cdp_token);
     }
     // Fall through: GET request that isn't a /json endpoint → treat as
     // WebSocket upgrade (Chromium DevTools clients issue GET with
@@ -775,6 +814,7 @@ fn handle_http_json_blocking(
     mut stream: std::net::TcpStream,
     port: u16,
     endpoint: &str,
+    cdp_token: &str,
 ) -> anyhow::Result<()> {
     use std::io::{Read, Write};
 
@@ -788,7 +828,7 @@ fn handle_http_json_blocking(
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
             "V8-Version": "14.5.0.0",
             "WebKit-Version": "537.36",
-            "webSocketDebuggerUrl": format!("ws://127.0.0.1:{}/devtools/browser", port),
+            "webSocketDebuggerUrl": crate::cdp_auth::debugger_url("127.0.0.1", port, cdp_token),
         }))?,
         "list" => serde_json::to_string_pretty(&json!([{
             "description": "",

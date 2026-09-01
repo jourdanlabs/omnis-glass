@@ -1,6 +1,7 @@
 pub mod server;
 pub mod dispatch;
 pub mod glass;
+pub mod cdp_auth;
 pub mod types;
 pub mod domains;
 pub mod cookie_params;
