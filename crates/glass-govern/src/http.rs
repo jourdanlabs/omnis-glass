@@ -2,7 +2,7 @@ use glass_terminus::BrowserAction;
 use serde_json::json;
 use url::Url;
 
-use crate::gate::gate_browser_action_with_network;
+use crate::gate::{gate_browser_action_with_context, GateNetworkContext};
 
 #[derive(Debug, Clone, Copy)]
 pub enum HttpGateAction {
@@ -38,12 +38,12 @@ pub fn gate_http_outbound(
     allow_private_network: bool,
 ) -> Result<(), String> {
     let body_text = body.map(|b| String::from_utf8_lossy(b).to_string());
-    gate_browser_action_with_network(
+    gate_browser_action_with_context(
         kind.browser_action(),
         url.as_str(),
         body_text.map(|b| json!({"payload": b, "http_action": kind.action_label()})),
         session_id,
-        allow_private_network,
+        GateNetworkContext::from_allow_private(allow_private_network),
     )
 }
 
@@ -54,12 +54,12 @@ pub fn gate_redirect_destination(
     session_id: &str,
     allow_private_network: bool,
 ) -> Result<(), String> {
-    gate_browser_action_with_network(
+    gate_browser_action_with_context(
         BrowserAction::Navigate,
         to,
         None,
         session_id,
-        allow_private_network,
+        GateNetworkContext::from_allow_private(allow_private_network),
     )
     .map_err(|e| format!("TERMINUS REFUSED (redirect): {from} -> {to}: {e}"))
 }

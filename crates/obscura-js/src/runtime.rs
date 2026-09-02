@@ -15136,7 +15136,6 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&state_dir);
         std::env::set_var("OMNIS_GLASS_STATE_DIR", &state_dir);
-        std::env::set_var("OMNIS_GLASS_ENFORCE", "local_only");
         std::env::set_var(
             "TERMINUS_AUTHORIZE",
             concat!(

@@ -3,7 +3,7 @@ use std::sync::{Mutex, OnceLock};
 
 use glass_capture::{SsrfCheck, SsrfVerdict};
 use glass_ledger::{digest_sha256, BrowserActionWriter};
-use glass_terminus::{target_from_url, BrowserAction, OutboundEnvelope, TerminusGate};
+use glass_terminus::{target_from_url, BrowserAction, EnforceMode, OutboundEnvelope, TerminusGate};
 use serde_json::{json, Map, Value};
 
 use crate::session::{self, Driver};
@@ -61,10 +61,42 @@ pub fn gate_browser_action(
     payload: Option<Value>,
     session_id: &str,
 ) -> Result<(), String> {
-    gate_browser_action_with_network(action, url, payload, session_id, false)
+    gate_browser_action_with_context(
+        action,
+        url,
+        payload,
+        session_id,
+        GateNetworkContext::strict(),
+    )
 }
 
-/// Like [`gate_browser_action`] but honors per-request private-network opt-in
+/// Per-request gate options for HTTP/JS fetch paths.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GateNetworkContext {
+    pub allow_private_network: bool,
+    pub enforce_override: Option<EnforceMode>,
+}
+
+impl GateNetworkContext {
+    pub fn strict() -> Self {
+        Self::default()
+    }
+
+    /// Matches `validate_fetch_url`: private-network opt-in skips SSRF and uses
+    /// local-only lane enforcement for this request (not process-global env).
+    pub fn from_allow_private(allow_private_network: bool) -> Self {
+        Self {
+            allow_private_network,
+            enforce_override: if allow_private_network {
+                Some(EnforceMode::LocalOnly)
+            } else {
+                None
+            },
+        }
+    }
+}
+
+/// Like [`gate_browser_action`] but honors per-request network context
 /// (e.g. JS fetch via `ObscuraHttpClient.allow_private_network`).
 pub fn gate_browser_action_with_network(
     action: BrowserAction,
@@ -72,6 +104,22 @@ pub fn gate_browser_action_with_network(
     payload: Option<Value>,
     session_id: &str,
     allow_private_network: bool,
+) -> Result<(), String> {
+    gate_browser_action_with_context(
+        action,
+        url,
+        payload,
+        session_id,
+        GateNetworkContext::from_allow_private(allow_private_network),
+    )
+}
+
+pub fn gate_browser_action_with_context(
+    action: BrowserAction,
+    url: &str,
+    payload: Option<Value>,
+    session_id: &str,
+    ctx: GateNetworkContext,
 ) -> Result<(), String> {
     if session_id != "pane-human" && session::agent_blocked() {
         return Err("TERMINUS REFUSE (session_locked): REFUSE_SESSION_LOCKED".into());
@@ -102,7 +150,11 @@ pub fn gate_browser_action_with_network(
     );
 
     session::set_inflight(action.as_str());
-    let verdict = gate.authorize_with_network(&envelope, allow_private_network);
+    let verdict = gate.authorize_with_network(
+        &envelope,
+        ctx.allow_private_network,
+        ctx.enforce_override,
+    );
     let mut fields = Map::new();
     fields.insert("url".into(), json!(url));
     if let Some(p) = payload {

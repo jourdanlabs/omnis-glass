@@ -108,15 +108,22 @@ impl TerminusGate {
     }
 
     pub fn authorize(&self, envelope: &OutboundEnvelope) -> GateVerdict {
-        self.authorize_with_network(envelope, false)
+        self.authorize_with_network(envelope, false, None)
     }
 
     pub fn authorize_with_network(
         &self,
         envelope: &OutboundEnvelope,
         allow_private_network: bool,
+        enforce_override: Option<EnforceMode>,
     ) -> GateVerdict {
-        if self.enforce == EnforceMode::DenyAll {
+        let enforce = if self.enforce == EnforceMode::DenyAll {
+            EnforceMode::DenyAll
+        } else {
+            enforce_override.unwrap_or(self.enforce)
+        };
+
+        if enforce == EnforceMode::DenyAll {
             return GateVerdict {
                 verdict: "REFUSE".into(),
                 decision: "REFUSE_DENY_ALL".into(),
@@ -129,7 +136,7 @@ impl TerminusGate {
             return ssrf;
         }
 
-        if self.enforce == EnforceMode::LocalOnly {
+        if enforce == EnforceMode::LocalOnly {
             return GateVerdict {
                 verdict: "ALLOW".into(),
                 decision: "PERMIT".into(),
