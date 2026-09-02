@@ -82,16 +82,20 @@ impl GateNetworkContext {
         Self::default()
     }
 
-    /// Matches `validate_fetch_url`: private-network opt-in skips SSRF and uses
-    /// local-only lane enforcement for this request (not process-global env).
-    pub fn from_allow_private(allow_private_network: bool) -> Self {
+    /// SSRF opt-in only — does not alter lane/host/TERMINUS enforcement.
+    pub fn with_allow_private(allow_private_network: bool) -> Self {
         Self {
             allow_private_network,
-            enforce_override: if allow_private_network {
-                Some(EnforceMode::LocalOnly)
-            } else {
-                None
-            },
+            enforce_override: None,
+        }
+    }
+
+    /// Integration-test fixture hook — not used by production call sites.
+    #[doc(hidden)]
+    pub fn test_fixture(allow_private_network: bool, enforce_override: EnforceMode) -> Self {
+        Self {
+            allow_private_network,
+            enforce_override: Some(enforce_override),
         }
     }
 }
@@ -110,7 +114,7 @@ pub fn gate_browser_action_with_network(
         url,
         payload,
         session_id,
-        GateNetworkContext::from_allow_private(allow_private_network),
+        GateNetworkContext::with_allow_private(allow_private_network),
     )
 }
 

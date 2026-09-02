@@ -117,6 +117,17 @@ impl TerminusGate {
         allow_private_network: bool,
         enforce_override: Option<EnforceMode>,
     ) -> GateVerdict {
+        // Integration-test hook only (`OMNIS_GLASS_TEST_ENFORCE_OVERRIDE`). Production
+        // call sites pass `None`; CLI never sets this env var.
+        let enforce_override = enforce_override.or_else(|| {
+            std::env::var("OMNIS_GLASS_TEST_ENFORCE_OVERRIDE")
+                .ok()
+                .and_then(|v| match v.to_lowercase().as_str() {
+                    "local_only" => Some(EnforceMode::LocalOnly),
+                    _ => None,
+                })
+        });
+
         let enforce = if self.enforce == EnforceMode::DenyAll {
             EnforceMode::DenyAll
         } else {

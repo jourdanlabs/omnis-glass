@@ -32,6 +32,17 @@ fn a13_disallowed_host_refused_at_http_boundary() {
 }
 
 #[test]
+fn a13_private_network_opt_in_still_refuses_disallowed_public_host() {
+    setup();
+    let url = Url::parse("https://evil.example/data").unwrap();
+    let err = gate_http_outbound(&url, None, HttpGateAction::ScriptFetch, "a13", true);
+    assert!(
+        err.is_err(),
+        "allow_private_network must not bypass lane/host/TERMINUS for public evil host"
+    );
+}
+
+#[test]
 fn a13_secret_body_refused_at_http_boundary() {
     setup();
     let url = Url::parse("https://example.com/post").unwrap();

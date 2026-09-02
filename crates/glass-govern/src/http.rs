@@ -1,4 +1,5 @@
 use glass_terminus::BrowserAction;
+use glass_terminus::EnforceMode;
 use serde_json::json;
 use url::Url;
 
@@ -43,7 +44,29 @@ pub fn gate_http_outbound(
         url.as_str(),
         body_text.map(|b| json!({"payload": b, "http_action": kind.action_label()})),
         session_id,
-        GateNetworkContext::from_allow_private(allow_private_network),
+        GateNetworkContext::with_allow_private(allow_private_network),
+    )
+}
+
+/// Test-only HTTP gate — passes an explicit enforce override for integration
+/// fixtures. Production paths (`ops.rs`, `client.rs`) must use
+/// [`gate_http_outbound`] instead.
+#[doc(hidden)]
+pub fn gate_http_outbound_test_fixture(
+    url: &Url,
+    body: Option<&[u8]>,
+    kind: HttpGateAction,
+    session_id: &str,
+    allow_private_network: bool,
+    enforce_override: EnforceMode,
+) -> Result<(), String> {
+    let body_text = body.map(|b| String::from_utf8_lossy(b).to_string());
+    gate_browser_action_with_context(
+        kind.browser_action(),
+        url.as_str(),
+        body_text.map(|b| json!({"payload": b, "http_action": kind.action_label()})),
+        session_id,
+        GateNetworkContext::test_fixture(allow_private_network, enforce_override),
     )
 }
 
@@ -59,7 +82,7 @@ pub fn gate_redirect_destination(
         to,
         None,
         session_id,
-        GateNetworkContext::from_allow_private(allow_private_network),
+        GateNetworkContext::with_allow_private(allow_private_network),
     )
     .map_err(|e| format!("TERMINUS REFUSED (redirect): {from} -> {to}: {e}"))
 }
