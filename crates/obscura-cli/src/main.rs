@@ -1230,6 +1230,7 @@ async fn fetch_original_response(
                 None,
                 glass_govern::HttpGateAction::DumpOriginal,
                 "dump-original",
+                false,
             ) {
                 anyhow::bail!("{reason}");
             }

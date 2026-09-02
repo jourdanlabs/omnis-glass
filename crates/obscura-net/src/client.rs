@@ -1389,6 +1389,7 @@ impl ObscuraHttpClient {
             initial_body.as_deref(),
             gate_kind,
             "http",
+            self.allow_private_network,
         ) {
             return Err(ObscuraNetError::Blocked(reason));
         }
@@ -1615,6 +1616,7 @@ impl ObscuraHttpClient {
                         current_url.as_str(),
                         next_url.as_str(),
                         "http",
+                        self.allow_private_network,
                     ) {
                         return Err(ObscuraNetError::Blocked(reason));
                     }

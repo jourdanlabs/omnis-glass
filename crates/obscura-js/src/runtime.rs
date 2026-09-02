@@ -15129,6 +15129,22 @@ mod tests {
     /// instead of the target. A broken fixture thereby fails the test
     /// instead of letting it pass.
     fn redirect_chain_runtime(connections: usize) -> ObscuraJsRuntime {
+        let state_dir = std::env::temp_dir().join(format!(
+            "omnis-glass-redirect-{}-{}",
+            std::process::id(),
+            connections
+        ));
+        let _ = std::fs::create_dir_all(&state_dir);
+        std::env::set_var("OMNIS_GLASS_STATE_DIR", &state_dir);
+        std::env::set_var("OMNIS_GLASS_ENFORCE", "local_only");
+        std::env::set_var(
+            "TERMINUS_AUTHORIZE",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/terminus-authorize.mjs"
+            ),
+        );
+
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {
@@ -15218,7 +15234,8 @@ mod tests {
                         const response = await fetch("/hop/21");
                         return "resolved " + (await response.text());
                     } catch (error) {
-                        return error instanceof TypeError ? "rejected" : "other";
+                        const msg = error && error.message ? String(error.message) : "";
+                        return msg.includes("Too many redirects") ? "rejected" : "other";
                     }
                 }"#,
                 None,

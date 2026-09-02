@@ -89,7 +89,15 @@ impl TerminusGate {
     }
 
     pub fn check_ssrf(&self, url: &str) -> Option<GateVerdict> {
-        match self.ssrf.check_url(url) {
+        self.check_ssrf_with_allow(url, self.ssrf.allow_private)
+    }
+
+    /// Per-request SSRF check — honors the HTTP client's `allow_private_network`
+    /// opt-in in addition to process-global `OBSCURA_ALLOW_PRIVATE_NETWORK`.
+    pub fn check_ssrf_with_allow(&self, url: &str, allow_private_network: bool) -> Option<GateVerdict> {
+        let allow_private = allow_private_network || self.ssrf.allow_private;
+        let check = SsrfCheck { allow_private };
+        match check.check_url(url) {
             SsrfVerdict::Allow => None,
             SsrfVerdict::Refuse(r) => Some(GateVerdict {
                 verdict: "REFUSE".into(),
@@ -100,6 +108,14 @@ impl TerminusGate {
     }
 
     pub fn authorize(&self, envelope: &OutboundEnvelope) -> GateVerdict {
+        self.authorize_with_network(envelope, false)
+    }
+
+    pub fn authorize_with_network(
+        &self,
+        envelope: &OutboundEnvelope,
+        allow_private_network: bool,
+    ) -> GateVerdict {
         if self.enforce == EnforceMode::DenyAll {
             return GateVerdict {
                 verdict: "REFUSE".into(),
@@ -109,7 +125,7 @@ impl TerminusGate {
         }
 
         // SSRF before lane/host — literal and DNS-resolved private addresses
-        if let Some(ssrf) = self.check_ssrf(&envelope.target.url) {
+        if let Some(ssrf) = self.check_ssrf_with_allow(&envelope.target.url, allow_private_network) {
             return ssrf;
         }
 

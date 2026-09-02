@@ -2,7 +2,7 @@ use glass_terminus::BrowserAction;
 use serde_json::json;
 use url::Url;
 
-use crate::gate::gate_browser_action;
+use crate::gate::gate_browser_action_with_network;
 
 #[derive(Debug, Clone, Copy)]
 pub enum HttpGateAction {
@@ -35,21 +35,33 @@ pub fn gate_http_outbound(
     body: Option<&[u8]>,
     kind: HttpGateAction,
     session_id: &str,
+    allow_private_network: bool,
 ) -> Result<(), String> {
     let body_text = body.map(|b| String::from_utf8_lossy(b).to_string());
-    gate_browser_action(
+    gate_browser_action_with_network(
         kind.browser_action(),
         url.as_str(),
         body_text.map(|b| json!({"payload": b, "http_action": kind.action_label()})),
         session_id,
+        allow_private_network,
     )
 }
 
 /// Re-gate redirect destination; returns Err to block follow.
-pub fn gate_redirect_destination(from: &str, to: &str, session_id: &str) -> Result<(), String> {
-    gate_browser_action(BrowserAction::Navigate, to, None, session_id).map_err(|e| {
-        format!("TERMINUS REFUSED (redirect): {from} -> {to}: {e}")
-    })
+pub fn gate_redirect_destination(
+    from: &str,
+    to: &str,
+    session_id: &str,
+    allow_private_network: bool,
+) -> Result<(), String> {
+    gate_browser_action_with_network(
+        BrowserAction::Navigate,
+        to,
+        None,
+        session_id,
+        allow_private_network,
+    )
+    .map_err(|e| format!("TERMINUS REFUSED (redirect): {from} -> {to}: {e}"))
 }
 
 /// Strip Authorization-like headers on cross-origin redirect (architecture §3a).

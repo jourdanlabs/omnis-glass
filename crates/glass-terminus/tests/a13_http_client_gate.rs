@@ -27,7 +27,7 @@ fn setup() {
 fn a13_disallowed_host_refused_at_http_boundary() {
     setup();
     let url = Url::parse("https://evil.example/data").unwrap();
-    let err = gate_http_outbound(&url, None, HttpGateAction::DumpOriginal, "a13");
+    let err = gate_http_outbound(&url, None, HttpGateAction::DumpOriginal, "a13", false);
     assert!(err.is_err(), "disallowed host must REFUSE");
 }
 
@@ -36,7 +36,7 @@ fn a13_secret_body_refused_at_http_boundary() {
     setup();
     let url = Url::parse("https://example.com/post").unwrap();
     let secret = b"sk-abcdefghijklmnopqrstuvwxyz1234567890";
-    let err = gate_http_outbound(&url, Some(secret), HttpGateAction::ScriptFetch, "a13");
+    let err = gate_http_outbound(&url, Some(secret), HttpGateAction::ScriptFetch, "a13", false);
     assert!(err.is_err(), "secret in fetch body must REFUSE");
 }
 
@@ -107,6 +107,7 @@ fn a13_WEAKEN_would_allow_secret() {
         Some(b"sk-abcdefghijklmnopqrstuvwxyz1234567890"),
         HttpGateAction::ScriptFetch,
         "a13",
+        false,
     );
     assert!(result.is_ok(), "WEAKEN: weakened gate would allow secret body");
 }

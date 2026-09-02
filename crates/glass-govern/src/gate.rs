@@ -61,6 +61,18 @@ pub fn gate_browser_action(
     payload: Option<Value>,
     session_id: &str,
 ) -> Result<(), String> {
+    gate_browser_action_with_network(action, url, payload, session_id, false)
+}
+
+/// Like [`gate_browser_action`] but honors per-request private-network opt-in
+/// (e.g. JS fetch via `ObscuraHttpClient.allow_private_network`).
+pub fn gate_browser_action_with_network(
+    action: BrowserAction,
+    url: &str,
+    payload: Option<Value>,
+    session_id: &str,
+    allow_private_network: bool,
+) -> Result<(), String> {
     if session_id != "pane-human" && session::agent_blocked() {
         return Err("TERMINUS REFUSE (session_locked): REFUSE_SESSION_LOCKED".into());
     }
@@ -90,7 +102,7 @@ pub fn gate_browser_action(
     );
 
     session::set_inflight(action.as_str());
-    let verdict = gate.authorize(&envelope);
+    let verdict = gate.authorize_with_network(&envelope, allow_private_network);
     let mut fields = Map::new();
     fields.insert("url".into(), json!(url));
     if let Some(p) = payload {

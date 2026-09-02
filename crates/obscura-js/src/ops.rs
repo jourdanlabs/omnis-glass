@@ -2374,7 +2374,7 @@ async fn op_fetch_url(
             })
             .to_string());
         }
-        if let Err(e) = gate_js_fetch(&url, &body, None) {
+        if let Err(e) = gate_js_fetch(&url, &body, None, allow_private_network) {
             return Ok(serde_json::json!({
                 "status": 0,
                 "body": "",
@@ -2481,7 +2481,7 @@ async fn op_fetch_url(
                 })
                 .to_string());
             }
-            if let Err(reason) = gate_js_fetch(&new_url, &body, Some(&url)) {
+            if let Err(reason) = gate_js_fetch(&new_url, &body, Some(&url), allow_private_network) {
                 return Ok(serde_json::json!({
                     "status": 0,
                     "body": "",
@@ -2733,7 +2733,7 @@ async fn op_fetch_url(
             })
             .to_string());
         }
-        if let Err(reason) = gate_js_fetch(next_url.as_str(), &current_body, Some(&current_url)) {
+        if let Err(reason) = gate_js_fetch(next_url.as_str(), &current_body, Some(&current_url), allow_private_network) {
             return Ok(serde_json::json!({
                 "status": 0,
                 "body": "",
@@ -2943,6 +2943,7 @@ async fn stealth_fetch_all(
             } else {
                 Some(&previous_url)
             },
+            allow_private_network,
         ) {
             return Ok(serde_json::json!({
                 "status": 0, "body": "", "url": current_url, "headers": {},
@@ -3004,7 +3005,7 @@ async fn stealth_fetch_all(
             })
             .to_string());
         }
-        if let Err(reason) = gate_js_fetch(next_url.as_str(), &current_body, Some(&current_url)) {
+        if let Err(reason) = gate_js_fetch(next_url.as_str(), &current_body, Some(&current_url), allow_private_network) {
             return Ok(serde_json::json!({
                 "status": 0, "body": "", "url": next_url.to_string(), "headers": {},
                 "blocked": true,
@@ -3683,11 +3684,16 @@ mod tests {
     }
 }
 
-fn gate_js_fetch(url: &str, body: &[u8], from_url: Option<&str>) -> Result<(), String> {
+fn gate_js_fetch(
+    url: &str,
+    body: &[u8],
+    from_url: Option<&str>,
+    allow_private_network: bool,
+) -> Result<(), String> {
     std::env::set_var("OMNIS_GLASS_HTTP_ACTION", "script-fetch");
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid fetch url: {e}"))?;
     if let Some(from) = from_url {
-        glass_govern::gate_redirect_destination(from, url, "js")
+        glass_govern::gate_redirect_destination(from, url, "js", allow_private_network)
             .map_err(|e| format!("Redirect blocked: {e}"))?;
     }
     glass_govern::gate_http_outbound(
@@ -3695,6 +3701,7 @@ fn gate_js_fetch(url: &str, body: &[u8], from_url: Option<&str>) -> Result<(), S
         if body.is_empty() { None } else { Some(body) },
         glass_govern::HttpGateAction::ScriptFetch,
         "js",
+        allow_private_network,
     )
 }
 

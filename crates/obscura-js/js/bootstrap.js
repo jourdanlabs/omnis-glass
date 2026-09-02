@@ -7030,7 +7030,7 @@ globalThis.fetch = async (input, init = {}) => {
   const raw = await Deno.core.ops.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials);
   const parsed = JSON.parse(raw);
   if (parsed.blocked) {
-    const err = new TypeError('net::ERR_FAILED');
+    const err = new TypeError(parsed.error || 'net::ERR_FAILED');
     err.name = 'AbortError';
     err.__aborted = true;
     throw err;
