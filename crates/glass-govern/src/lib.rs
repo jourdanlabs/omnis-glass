@@ -6,9 +6,9 @@ mod http;
 mod session;
 
 pub use gate::{
-    check_post_navigate_redirect, gate_browser_action, gate_cdp_command, gate_pane_navigate,
-    gate_storage_cookies, governance_enabled, record_handoff_cancel, record_navigation,
-    session_id_key, state_dir,
+    check_post_navigate_redirect, gate_browser_action, gate_browser_action_with_context,
+    gate_cdp_command, gate_pane_navigate, gate_storage_cookies, governance_enabled,
+    record_handoff_cancel, record_navigation, session_id_key, state_dir, GateNetworkContext,
 };
 pub use capture::emit_live_capture;
 pub use http::{gate_http_outbound, gate_redirect_destination, HttpGateAction, strip_cross_origin_auth};

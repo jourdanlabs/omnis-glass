@@ -77,12 +77,28 @@ pub fn gate_redirect_destination(
     session_id: &str,
     allow_private_network: bool,
 ) -> Result<(), String> {
+    gate_redirect_destination_with_context(
+        from,
+        to,
+        session_id,
+        GateNetworkContext::with_allow_private(allow_private_network),
+    )
+}
+
+/// Like [`gate_redirect_destination`] with an explicit per-call context (tests only).
+#[doc(hidden)]
+pub fn gate_redirect_destination_with_context(
+    from: &str,
+    to: &str,
+    session_id: &str,
+    ctx: GateNetworkContext,
+) -> Result<(), String> {
     gate_browser_action_with_context(
         BrowserAction::Navigate,
         to,
         None,
         session_id,
-        GateNetworkContext::with_allow_private(allow_private_network),
+        ctx,
     )
     .map_err(|e| format!("TERMINUS REFUSED (redirect): {from} -> {to}: {e}"))
 }

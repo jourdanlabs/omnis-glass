@@ -397,6 +397,18 @@ impl StealthHttpClient {
                     })?;
                     validate_url(&next_url, false)?;
                     validate_request_mode(&request, &next_url)?;
+                    if let Err(reason) = glass_govern::gate_redirect_destination(
+                        current_url.as_str(),
+                        next_url.as_str(),
+                        "stealth-http",
+                        false,
+                    ) {
+                        return Err(ObscuraNetError::Blocked(reason));
+                    }
+                    if redirect_taints_origin(&request, &current_url, &next_url) {
+                        let mut extra = self.extra_headers.write().await;
+                        glass_govern::strip_cross_origin_auth(&mut extra, &current_url, &next_url);
+                    }
                     redirect_tainted |=
                         redirect_taints_origin(&request, &current_url, &next_url);
                     redirects.push(current_url.clone());

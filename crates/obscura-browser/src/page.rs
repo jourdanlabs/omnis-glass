@@ -4314,6 +4314,14 @@ impl Page {
 
     pub async fn process_pending_navigation(&mut self) -> Result<bool, PageError> {
         if let Some((url, method, body)) = self.take_pending_navigation() {
+            glass_govern::gate_browser_action(
+                glass_terminus::BrowserAction::Navigate,
+                &url,
+                None,
+                &self.id,
+            )
+            .map_err(|reason| PageError::NetworkError(format!("Request blocked: {reason}")))?;
+
             let source_url = self
                 .url
                 .as_ref()

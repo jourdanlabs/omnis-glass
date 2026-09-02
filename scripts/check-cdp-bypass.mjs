@@ -1,17 +1,31 @@
 #!/usr/bin/env node
-// Tree-wide bypass guard — flags ungoverned agent-facing Page/HTTP egress.
+// Agent-surface bypass guard — governed egress paths (MCP, JS fetch, CLI, HTTP clients, nav sink).
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const ROOT = join(import.meta.dirname, '..');
-const EXEMPT = JSON.parse(
-  readFileSync(join(ROOT, 'scripts/agent-surface-exemptions.json'), 'utf8'),
-);
+
+function loadExemptions() {
+  const agent = JSON.parse(
+    readFileSync(join(ROOT, 'scripts/agent-surface-exemptions.json'), 'utf8'),
+  );
+  const cdp = JSON.parse(
+    readFileSync(join(ROOT, 'scripts/cdp-dispatch-exemptions.json'), 'utf8'),
+  );
+  return {
+    files: [...(agent.files || []), ...(cdp.files || [])],
+    entries: [...(agent.entries || []), ...(cdp.entries || [])],
+  };
+}
+
+const EXEMPT = loadExemptions();
 
 const SCAN_ROOTS = [
   'crates/obscura-mcp/src',
   'crates/obscura-js/src/ops.rs',
   'crates/obscura-cli/src/main.rs',
+  'crates/obscura-net/src/client.rs',
+  'crates/obscura-net/src/wreq_client.rs',
 ];
 
 const CALL_PATTERNS = [
@@ -21,6 +35,19 @@ const CALL_PATTERNS = [
   { name: 'cached_request_client', re: /\bcached_request_client\s*\(/ },
 ];
 
+const REDIRECT_SCAN_FILES = [
+  'crates/obscura-net/src/client.rs',
+  'crates/obscura-net/src/wreq_client.rs',
+];
+
+const SINK_CHECKS = [
+  {
+    file: 'crates/obscura-browser/src/page.rs',
+    fn: 'process_pending_navigation',
+    mustInclude: 'gate_browser_action',
+  },
+];
+
 const GATE_MARKERS = [
   'gate_mcp_',
   'gated_navigate',
@@ -28,6 +55,7 @@ const GATE_MARKERS = [
   'gate_js_fetch',
   'gate_http_outbound',
   'gate_browser_action',
+  'gate_redirect_destination',
   'glass_govern::',
 ];
 
@@ -47,7 +75,7 @@ function walk(dir, out = []) {
 function isExempt(rel, lineNo, patternName) {
   if (rel === 'crates/obscura-mcp/src/page_gate.rs') return true;
   for (const entry of EXEMPT.entries || []) {
-    if (entry.file === rel && entry.pattern === patternName) {
+    if (entry.file === rel && (entry.pattern === patternName || entry.symbol === patternName)) {
       if (entry.lines && !entry.lines.includes(lineNo)) continue;
       return true;
     }
@@ -105,6 +133,40 @@ for (const file of collectFiles()) {
       if (governedNear(lines, i)) continue;
       violations.push({ file: rel, line: lineNo, pattern: name, text: line.trim() });
     }
+    if (REDIRECT_SCAN_FILES.includes(rel) && /\bcurrent_url = next_url\b/.test(line)) {
+      if (!governedNear(lines, i, 40)) {
+        violations.push({
+          file: rel,
+          line: lineNo,
+          pattern: 'redirect_hop_assign',
+          text: line.trim(),
+        });
+      }
+    }
+  }
+}
+
+for (const sink of SINK_CHECKS) {
+  const abs = join(ROOT, sink.file);
+  const src = readFileSync(abs, 'utf8');
+  const fnStart = src.indexOf(`fn ${sink.fn}`);
+  if (fnStart < 0) {
+    violations.push({
+      file: sink.file,
+      line: 0,
+      pattern: sink.fn,
+      text: `missing function ${sink.fn}`,
+    });
+    continue;
+  }
+  const fnBody = src.slice(fnStart, fnStart + 4000);
+  if (!fnBody.includes(sink.mustInclude)) {
+    violations.push({
+      file: sink.file,
+      line: 0,
+      pattern: sink.fn,
+      text: `sink ${sink.fn} missing ${sink.mustInclude}`,
+    });
   }
 }
 

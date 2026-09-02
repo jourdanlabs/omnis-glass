@@ -15129,21 +15129,6 @@ mod tests {
     /// instead of the target. A broken fixture thereby fails the test
     /// instead of letting it pass.
     /// instead of letting it pass.
-    struct TestEnforceOverride;
-
-    impl TestEnforceOverride {
-        fn local_only() -> Self {
-            std::env::set_var("OMNIS_GLASS_TEST_ENFORCE_OVERRIDE", "local_only");
-            Self
-        }
-    }
-
-    impl Drop for TestEnforceOverride {
-        fn drop(&mut self) {
-            std::env::remove_var("OMNIS_GLASS_TEST_ENFORCE_OVERRIDE");
-        }
-    }
-
     fn redirect_chain_runtime(connections: usize) -> ObscuraJsRuntime {
         let state_dir = std::env::temp_dir().join(format!(
             "omnis-glass-redirect-{}-{}",
@@ -15222,7 +15207,7 @@ mod tests {
     /// WPT covers the same pair in `fetch/api/redirect/redirect-count.any.js`.
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_follows_the_twentieth_redirect() {
-        let _test_enforce = TestEnforceOverride::local_only();
+        let _test_enforce = crate::test_gate_hooks::Guard::local_only();
         let mut rt = redirect_chain_runtime(21);
         let result = rt
             .call_function_on_for_cdp(
@@ -15242,7 +15227,7 @@ mod tests {
     /// fail. `fetch` reports a rejected result as a `TypeError`.
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_rejects_the_twenty_first_redirect() {
-        let _test_enforce = TestEnforceOverride::local_only();
+        let _test_enforce = crate::test_gate_hooks::Guard::local_only();
         let mut rt = redirect_chain_runtime(21);
         let result = rt
             .call_function_on_for_cdp(

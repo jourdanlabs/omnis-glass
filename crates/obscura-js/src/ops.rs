@@ -3692,17 +3692,75 @@ fn gate_js_fetch(
 ) -> Result<(), String> {
     std::env::set_var("OMNIS_GLASS_HTTP_ACTION", "script-fetch");
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid fetch url: {e}"))?;
+    let ctx = js_fetch_gate_context(allow_private_network);
     if let Some(from) = from_url {
-        glass_govern::gate_redirect_destination(from, url, "js", allow_private_network)
-            .map_err(|e| format!("Redirect blocked: {e}"))?;
+        glass_govern::gate_browser_action_with_context(
+            glass_terminus::BrowserAction::Navigate,
+            url,
+            None,
+            "js",
+            ctx,
+        )
+        .map_err(|e| format!("Redirect blocked: {e}"))?;
     }
-    glass_govern::gate_http_outbound(
-        &parsed,
-        if body.is_empty() { None } else { Some(body) },
-        glass_govern::HttpGateAction::ScriptFetch,
+    glass_govern::gate_browser_action_with_context(
+        glass_terminus::BrowserAction::ScriptFetch,
+        parsed.as_str(),
+        if body.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!({
+                "payload": String::from_utf8_lossy(body),
+                "http_action": "script-fetch",
+            }))
+        },
         "js",
-        allow_private_network,
+        ctx,
     )
+}
+
+fn js_fetch_gate_context(allow_private_network: bool) -> glass_govern::GateNetworkContext {
+    #[cfg(test)]
+    {
+        if let Some(mode) = test_gate_hooks::enforce_override() {
+            return glass_govern::GateNetworkContext::test_fixture(allow_private_network, mode);
+        }
+    }
+    glass_govern::GateNetworkContext::with_allow_private(allow_private_network)
+}
+
+#[cfg(test)]
+pub mod test_gate_hooks {
+    use std::cell::Cell;
+
+    use glass_terminus::EnforceMode;
+
+    thread_local! {
+        static ENFORCE_OVERRIDE: Cell<Option<EnforceMode>> = const { Cell::new(None) };
+    }
+
+    pub fn set_enforce_override(mode: Option<EnforceMode>) {
+        ENFORCE_OVERRIDE.with(|c| c.set(mode));
+    }
+
+    pub(super) fn enforce_override() -> Option<EnforceMode> {
+        ENFORCE_OVERRIDE.with(|c| c.get())
+    }
+
+    pub struct Guard;
+
+    impl Guard {
+        pub fn local_only() -> Self {
+            set_enforce_override(Some(EnforceMode::LocalOnly));
+            Self
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            set_enforce_override(None);
+        }
+    }
 }
 
 fn validate_fetch_url(url: &url::Url, allow_private_network: bool) -> Result<(), String> {
