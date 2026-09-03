@@ -2969,6 +2969,17 @@ impl Page {
             )
             .await?;
             if let Some((next_url, next_method, next_body)) = self.take_pending_navigation() {
+                // Second drain point (P1-3 round 3): JS-chained navigations must
+                // pass the same TERMINUS gate as process_pending_navigation.
+                // do_fetch was deliberately NOT gated instead — it also serves
+                // iframe script subresources, which are not navigations.
+                glass_govern::gate_browser_action(
+                    glass_terminus::BrowserAction::Navigate,
+                    &next_url,
+                    None,
+                    &self.id,
+                )
+                .map_err(|reason| PageError::NetworkError(format!("Request blocked: {reason}")))?;
                 if cross_scheme_to_file(&current_url, &next_url) {
                     // SOP gate. A web page must not be able to drive
                     // a navigation to file:// and then read the loaded
