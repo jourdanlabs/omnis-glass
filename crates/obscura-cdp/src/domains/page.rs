@@ -682,6 +682,10 @@ pub(crate) fn queue_screencast_frame(
     let cdp_session_id = cdp_session_id
         .as_deref()
         .ok_or("Page.startScreencast requires an attached target session")?;
+    if cdp_session_id.starts_with("glass-observation-")
+        && !ctx.get_session_page(&Some(cdp_session_id.to_string())).is_some_and(|page| page.has_js()) {
+        return Ok(false);
+    }
     let state = {
         let Some(state) = ctx.screencasts.get_mut(cdp_session_id) else {
             return Ok(false);
@@ -773,6 +777,16 @@ pub(crate) fn queue_screencast_frame(
 /// A dirty generation is retained across `everyNthFrame` sampling and the
 /// acknowledgement window, ensuring neither mechanism loses the latest frame.
 #[cfg(feature = "render")]
+pub(crate) fn invalidate_target_screencasts(ctx: &mut CdpContext, session: &Option<String>) {
+    let Some(target) = session.as_ref().and_then(|id| ctx.sessions.get(id)).cloned() else { return; };
+    for (id, state) in &mut ctx.screencasts {
+        if ctx.sessions.get(id) == Some(&target) {
+            state.autonomous_frame_pending = true;
+        }
+    }
+}
+
+#[cfg(feature = "render")]
 pub(crate) async fn pump_screencast_frames(ctx: &mut CdpContext) {
     let sessions: Vec<String> = ctx.screencasts.keys().cloned().collect();
     for cdp_session_id in sessions {
@@ -780,6 +794,11 @@ pub(crate) async fn pump_screencast_frames(ctx: &mut CdpContext) {
             continue;
         }
         let attached_session = Some(cdp_session_id.clone());
+        // Do not tear down another page's live isolate merely to sample a
+        // suspended target. Its next active turn will retain pending damage.
+        if !ctx.get_session_page(&attached_session).is_some_and(|page| page.has_js()) {
+            continue;
+        }
         let (activity_generation, css_animation_active) = {
             let Some(page) = ctx.get_session_page_mut(&attached_session) else {
                 continue;
@@ -1289,6 +1308,9 @@ pub async fn handle(
                 .get_session_page(session_id)
                 .map(|p| p.url_string())
                 .unwrap_or_else(|| "about:blank".to_string());
+            if current_url != "about:blank" {
+                glass_govern::gate_approved_navigation(&current_url, session_id.as_deref().unwrap_or("default"))?;
+            }
             let reload_params = json!({
                 "waitUntil": params.get("waitUntil").cloned().unwrap_or(json!("load"))
             });
@@ -1475,15 +1497,15 @@ pub async fn handle(
             let entry_id = params.get("entryId").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let target_url = {
                 let page = ctx
-                    .get_session_page_mut(session_id)
+                    .get_session_page(session_id)
                     .ok_or("No page for session")?;
-                let url = page.history.get(entry_id).cloned();
-                if url.is_some() {
-                    page.set_history_index(entry_id);
-                }
-                url
+                page.history.get(entry_id).cloned()
             };
             if let Some(url) = target_url {
+                if url != "about:blank" {
+                    glass_govern::gate_approved_navigation(&url, session_id.as_deref().unwrap_or("default"))?;
+                }
+                ctx.get_session_page_mut(session_id).ok_or("No page for session")?.set_history_index(entry_id);
                 // Stash + restore history so push_history doesn't clobber
                 // the cursor we just moved.
                 let stash = {
@@ -1539,10 +1561,12 @@ pub async fn handle(
                     .as_ref()
                     .ok_or("Page.startScreencast requires an attached target session")?
                     .clone();
-                let page = ctx
-                    .get_session_page_mut(session_id)
-                    .ok_or("No page for session")?;
-                prepare_capture_resources_if_requested(page).await;
+                let suspended_observer = cdp_session.starts_with("glass-observation-")
+                    && !ctx.get_session_page(session_id).ok_or("No page for session")?.has_js();
+                if !suspended_observer {
+                    let page = ctx.get_session_page_mut(session_id).ok_or("No page for session")?;
+                    prepare_capture_resources_if_requested(page).await;
+                }
                 let stream_id = ctx.next_screencast_session();
                 let state = parse_screencast_state(params, stream_id)?;
                 ctx.screencasts.insert(cdp_session.clone(), state);
@@ -1749,6 +1773,7 @@ mod tests {
 
     #[test]
     fn runtime_network_events_reuse_the_document_loader_without_lifecycle_replay() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some(format!("{page_id}-session"));
@@ -1796,6 +1821,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_layout_metrics_returns_chrome_default_viewport() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let result = handle("getLayoutMetrics", &json!({}), &mut ctx, &None)
             .await
@@ -1833,6 +1859,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn cdp_metrics_and_capture_follow_the_scrolled_viewport() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = format!("{page_id}-session");
@@ -1884,6 +1911,45 @@ mod tests {
             top_data, scrolled_data,
             "CDP captureScreenshot must paint the current scroll offset"
         );
+    }
+
+    #[tokio::test]
+    async fn refused_history_navigation_preserves_cursor_and_url() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
+        std::env::set_var("OMNIS_GLASS_ENFORCE", "enforce");
+        std::env::set_var("OMNIS_GLASS_LANE", "browse:human");
+        std::env::remove_var("OMNIS_GLASS_LANES");
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = Some(format!("{page_id}-session"));
+        ctx.sessions.insert(session.clone().unwrap(), page_id);
+        let page = ctx.get_session_page_mut(&session).unwrap();
+        page.history = vec!["https://example.com/".into(), "data:text/html,blocked".into()];
+        page.history_index = 0;
+        let url_before = page.url_string();
+        let error = handle("navigateToHistoryEntry", &json!({"entryId":1}), &mut ctx, &session).await.unwrap_err();
+        assert!(error.contains("REFUSE_HOST"), "{error}");
+        let page = ctx.get_session_page(&session).unwrap();
+        assert_eq!(page.history_index, 0);
+        assert_eq!(page.url_string(), url_before);
+    }
+
+    #[tokio::test]
+    async fn refused_reload_preserves_page_and_history() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
+        std::env::set_var("OMNIS_GLASS_ENFORCE", "enforce");
+        std::env::set_var("OMNIS_GLASS_LANE", "browse:human");
+        std::env::remove_var("OMNIS_GLASS_LANES");
+        let mut ctx = CdpContext::new(); let page_id = ctx.create_page();
+        let session = Some(format!("{page_id}-session")); ctx.sessions.insert(session.clone().unwrap(), page_id);
+        let page = ctx.get_session_page_mut(&session).unwrap();
+        page.url = Some(url::Url::parse("data:text/html,blocked").unwrap());
+        page.history = vec!["about:blank".into(), "data:text/html,blocked".into()]; page.history_index = 1;
+        let before = (page.url_string(), page.history.clone(), page.history_index);
+        let error = handle("reload", &json!({}), &mut ctx, &session).await.unwrap_err();
+        assert!(error.contains("REFUSE_HOST"), "{error}");
+        let page = ctx.get_session_page(&session).unwrap();
+        assert_eq!((page.url_string(), page.history.clone(), page.history_index), before);
     }
 
     #[cfg(feature = "render")]
@@ -1952,6 +2018,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn default_background_override_matches_chromium_across_capture_state() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let (mut ctx, session) = transparent_surface_fixture(160).await;
 
         let (_, default_raster) = decode_capture(
@@ -2052,6 +2119,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn default_background_override_is_target_isolated() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let (mut ctx, first_session) = transparent_surface_fixture(80).await;
         let second_page_id = ctx.create_page();
         let second_session_id = format!("{second_page_id}-session");
@@ -2098,6 +2166,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn default_background_override_covers_clips_full_page_and_screencast_damage() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let (mut ctx, session) = transparent_surface_fixture(160).await;
         crate::domains::emulation::handle(
             "setDefaultBackgroundColorOverride",
@@ -2193,6 +2262,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn screencast_initial_frame_metadata_and_encoding_match_options() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let (mut ctx, session) = screenshot_fixture().await;
         ctx.pending_events.clear();
         let result = handle(
@@ -2254,6 +2324,10 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn css_animation_drives_autonomous_screencast_frames_until_completion() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
+        let state = tempfile::tempdir().unwrap();
+        std::env::set_var("OMNIS_GLASS_STATE_DIR", state.path());
+        std::env::set_var("OMNIS_GLASS_ENFORCE", "local_only");
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = format!("{page_id}-session");
@@ -2364,6 +2438,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn screencast_sampling_backpressure_and_stale_acks_are_bounded() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let (mut ctx, session) = screenshot_fixture().await;
         ctx.pending_events.clear();
         handle(
@@ -2427,6 +2502,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn capture_methods_do_not_start_default_resource_warmups() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         use std::io::{Read as _, Write as _};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2517,6 +2593,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn screencast_options_validate_protocol_shapes() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         assert!(parse_screencast_state(&json!({"format": "webp"}), 1).is_err());
         assert!(parse_screencast_state(&json!({"everyNthFrame": 0}), 1).is_err());
         assert!(parse_screencast_state(&json!({"maxWidth": 20.5}), 1).is_err());
@@ -2531,6 +2608,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn capture_screenshot_preserves_default_png_and_honors_clip_scale() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let (mut ctx, session) = screenshot_fixture().await;
         let native = {
             let page = ctx.get_session_page(&session).expect("page");
@@ -2626,6 +2704,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn default_capture_rejects_oversized_viewport_before_raster_allocation() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let (mut ctx, session) = screenshot_fixture().await;
         ctx.get_session_page_mut(&session)
             .expect("page")
@@ -2640,6 +2719,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn long_full_page_png_is_contiguous_and_preserves_live_scroll_and_fixed_geometry() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = format!("{page_id}-session");
@@ -2722,6 +2802,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn long_full_page_png_uses_global_device_pixel_boundaries_at_dpr_two() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = format!("{page_id}-session");
@@ -2779,6 +2860,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn long_full_page_png_rejects_more_than_thirty_two_megapixels_before_striping() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = format!("{page_id}-session");
@@ -2816,6 +2898,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn capture_screenshot_encodes_jpeg_and_lossless_webp() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let (mut ctx, session) = screenshot_fixture().await;
         let jpeg = handle(
             "captureScreenshot",
@@ -2867,6 +2950,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn capture_screenshot_validates_like_chromium() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let options = parse_screenshot_options(&json!({
             "format": "jpeg",
             "quality": -1,
@@ -2914,6 +2998,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn capture_screenshot_supports_full_page_and_off_viewport_clips() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let (mut ctx, session) = screenshot_fixture().await;
         ctx.get_session_page_mut(&session).expect("page").evaluate(
             "Object.defineProperty(globalThis,'innerWidth',{value:4096,configurable:true});\
@@ -2968,6 +3053,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test]
     async fn capture_screenshot_combines_device_and_clip_scale_without_relayout() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let (mut ctx, session) = screenshot_fixture().await;
         crate::domains::emulation::handle(
             "setDeviceMetricsOverride",
@@ -3015,6 +3101,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_page_method_still_errors() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let err = handle("notARealMethod", &json!({}), &mut ctx, &None)
             .await
@@ -3024,6 +3111,7 @@ mod tests {
 
     #[tokio::test]
     async fn print_to_pdf_is_explicit_without_a_renderable_session() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         // Regression for #53: Page.printToPDF must be handled explicitly so
         // Playwright clients receive a descriptive error rather than the
         // generic "Unknown Page method" fallback.
@@ -3050,6 +3138,7 @@ mod tests {
     /// no idea why their screenshot request failed.
     #[tokio::test]
     async fn capture_screenshot_returns_descriptive_unsupported_error() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let err = handle("captureScreenshot", &json!({}), &mut ctx, &None)
             .await
@@ -3075,6 +3164,7 @@ mod tests {
 
     #[tokio::test]
     async fn navigation_emits_target_info_changed_with_url_and_title() {
+        let _glass_isolated_state = crate::domains::page::glass_fixture_env::isolated_state();
         // Strict CDP clients (browser-use, Puppeteer/Playwright `page.url()`)
         // refresh a target's url/title only on Target.targetInfoChanged. A
         // navigation must emit it with the post-nav url/title, otherwise those
@@ -3126,3 +3216,6 @@ mod tests {
         assert_eq!(info["canAccessOpener"], json!(false));
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

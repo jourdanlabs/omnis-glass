@@ -10,6 +10,7 @@ members = [
     "crates/obscura-render",
     "crates/obscura-cli",
     "crates/obscura",
+    "crates/glass-build-info",
     "crates/glass-ledger",
     "crates/glass-capture",
     "crates/glass-terminus",
@@ -22,7 +23,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "BUSL-1.1"
 repository = "https://github.com/jourdanlabs/omnis-glass"
 
 [workspace.dependencies]

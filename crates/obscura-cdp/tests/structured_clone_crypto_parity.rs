@@ -93,6 +93,7 @@ async fn setup() -> (CdpContext, String) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn structured_clone_preserves_arraybuffer_bytes() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     // A 4-byte view into a 4-byte buffer. The JSON fallback loses the buffer
     // entirely (Uint8Array serializes to {}), so byteLength reads back as 0.
@@ -121,6 +122,7 @@ async fn structured_clone_preserves_arraybuffer_bytes() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cryptokey_survives_structured_clone_and_still_signs() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     // importKey -> structuredClone -> sign with the clone. On main the clone
     // has no WeakMap entry, so sign throws "Argument is not a valid CryptoKey".
@@ -156,6 +158,7 @@ async fn cryptokey_survives_structured_clone_and_still_signs() {
 // this feature targets, so it must clone cleanly.
 #[tokio::test(flavor = "current_thread")]
 async fn structured_clone_preserves_dataview() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let v = eval(
         &mut ctx,
@@ -189,6 +192,7 @@ async fn structured_clone_preserves_dataview() {
 // preserves identity (clone.cause === clone).
 #[tokio::test(flavor = "current_thread")]
 async fn structured_clone_handles_circular_error_cause() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let v = eval(
         &mut ctx,
@@ -225,6 +229,7 @@ async fn structured_clone_handles_circular_error_cause() {
 // Object.prototype, matching Chrome, rather than inheriting the source proto.
 #[tokio::test(flavor = "current_thread")]
 async fn structured_clone_reproduces_own_proto_property() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let v = eval(
         &mut ctx,
@@ -254,6 +259,7 @@ async fn structured_clone_reproduces_own_proto_property() {
 // throwing DataCloneError, so this guards both the throw and the name.
 #[tokio::test(flavor = "current_thread")]
 async fn structured_clone_rejects_functions_and_symbols() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let v = eval(
         &mut ctx,
@@ -280,6 +286,7 @@ async fn structured_clone_rejects_functions_and_symbols() {
 // came back as two distinct objects.
 #[tokio::test(flavor = "current_thread")]
 async fn structured_clone_preserves_cryptokey_identity() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let v = eval(
         &mut ctx,
@@ -308,3 +315,6 @@ async fn structured_clone_preserves_cryptokey_identity() {
     assert_eq!(val["tag"], "CryptoKey");
     assert_eq!(val["sigLen"], 32, "the shared clone must remain usable by crypto.subtle");
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

@@ -62,6 +62,157 @@ enum ServerMessage {
     NewConnection {
         reply_tx: mpsc::UnboundedSender<String>,
     },
+    ObserverStart { observer_id: String, observation_id: String, target_id: String, params: serde_json::Value, request_id: u64 },
+    ObserverStop { session: String },
+    ObserverAck { session: String, stream_id: i64 },
+    ObserverMessage(String),
+    HumanCommand { observer_id: String, observation_id: String, request_id: u64, method: String, params: serde_json::Value },
+}
+
+// Only connection senders and snapshots cross threads; Page and V8 stay on
+// the connection's LocalSet. A guard removes the entry even if the processor
+// is aborted or its thread unwinds.
+#[derive(Clone)]
+struct TargetSnapshot {
+    id: String,
+    url: String,
+    title: String,
+    last_activity_ms: u64,
+    scripts_stopped: bool,
+}
+
+struct LiveConnection {
+    sender: mpsc::UnboundedSender<ServerMessage>,
+    targets: Vec<TargetSnapshot>,
+    sessions: std::collections::HashSet<String>,
+    authorized: bool,
+    observation: Option<Observation>,
+}
+
+struct Observation {
+    id: String,
+    owner_id: String,
+    target_id: String,
+    session: String,
+    next_frame: u64,
+    unacked: HashMap<u64, i64>,
+}
+
+fn live_registry() -> &'static std::sync::Mutex<HashMap<String, LiveConnection>> {
+    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, LiveConnection>>> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+// Resolve ownership every time autonomous page work is polled. A connection
+// may have several targets, and taking or releasing control can happen while a
+// page's event-loop future is parked.
+fn autonomous_page_context(connection_id: &str, target_id: Option<&str>, allow_private: bool) -> glass_govern::CommandContext {
+    let human = target_id.is_some_and(|target_id| {
+        let registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+        registry.iter().any(|(observer_id, connection)| {
+            connection.observation.as_ref().is_some_and(|observation| observation.owner_id == connection_id && observation.target_id == target_id)
+                && glass_govern::observer_owns_control(observer_id)
+        })
+    });
+    let context = if human { glass_govern::CommandContext::human() } else { glass_govern::CommandContext::agent() };
+    context.with_namespace(connection_id).with_private_network(allow_private)
+}
+
+struct RegistryGuard(String);
+
+impl Drop for RegistryGuard {
+    fn drop(&mut self) {
+        glass_govern::forget_connection_navigation(&self.0);
+        let mut registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+        let released = glass_govern::release_observer_control(&self.0);
+        if let Some(mut gone) = registry.remove(&self.0) {
+            if let Some(observation) = gone.observation.take() {
+                if let Some(owner) = registry.get(&observation.owner_id) {
+                    let _ = owner.sender.send(ServerMessage::ObserverStop { session: observation.session });
+                }
+            }
+            for connection in registry.values_mut() {
+                if released && connection.authorized {
+                    let _ = connection.sender.send(ServerMessage::ObserverMessage(mode_changed_event()));
+                }
+                if connection.observation.as_ref().map(|o| o.owner_id.as_str()) == Some(self.0.as_str()) {
+                    let observation = connection.observation.take().unwrap();
+                    let _ = connection.sender.send(ServerMessage::ObserverMessage(json!({"method":"Glass.observationEnded", "params":{"observationId": observation.id, "reason":"connection_closed"}}).to_string()));
+                }
+                if connection.authorized {
+                    let _ = connection.sender.send(ServerMessage::ObserverMessage(json!({"method":"Glass.targetsChanged", "params":{}}).to_string()));
+                }
+            }
+        }
+    }
+}
+
+fn update_target_snapshot(connection_id: &str, ctx: &CdpContext, active_target: Option<&str>) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_millis().min(u64::MAX as u128) as u64;
+    let mut registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(connection) = registry.get_mut(connection_id) else { return; };
+    let old = connection.targets.clone();
+    if connection.sessions.len() != ctx.sessions.len() || ctx.sessions.keys().any(|session| !connection.sessions.contains(session)) {
+        let current_sessions: std::collections::HashSet<String> = ctx.sessions.keys().cloned().collect();
+        for session in connection.sessions.difference(&current_sessions) {
+            glass_govern::forget_connection_session(connection_id, session);
+        }
+        for session in current_sessions.difference(&connection.sessions) {
+            if let Some(page) = ctx.sessions.get(session).and_then(|id| ctx.get_page(id)) {
+                glass_govern::record_connection_navigation(connection_id, session, &page.url_string());
+            }
+        }
+        connection.sessions = current_sessions;
+    }
+    let newest = old.iter().map(|target| target.last_activity_ms).max().unwrap_or(0);
+    let activity_time = now.max(newest.saturating_add(1));
+    connection.targets = ctx.pages.iter().map(|page| {
+        let url = page.url_string();
+        let previous = old.iter().find(|target| target.id == page.id);
+        let last_activity_ms = previous.filter(|target| active_target != Some(page.id.as_str()) && target.url == url && target.title == page.title)
+            .map(|target| target.last_activity_ms).unwrap_or(activity_time);
+        TargetSnapshot { id: page.id.clone(), url, title: page.title.clone(), last_activity_ms, scripts_stopped: page.scripts_stopped() }
+    }).collect();
+    let new = connection.targets.clone();
+    let owner = connection.sender.clone();
+    let newest_id = |targets: &[TargetSnapshot]| targets.iter().max_by_key(|target| target.last_activity_ms).map(|target| target.id.clone());
+    let changed = newest_id(&old) != newest_id(&new) || old.len() != new.len() || new.iter().any(|target| old.iter().find(|x| x.id == target.id)
+        .map(|x| x.url != target.url || x.title != target.title).unwrap_or(true));
+    for target in &new {
+        if old.iter().find(|previous| previous.id == target.id).is_some_and(|previous| previous.scripts_stopped != target.scripts_stopped) {
+            let message = json!({"method":"Glass.scriptsStoppedChanged", "params":{"connectionId":connection_id, "targetId":target.id, "scriptsStopped":target.scripts_stopped}}).to_string();
+            for observer in registry.values() {
+                if observer.authorized { let _ = observer.sender.send(ServerMessage::ObserverMessage(message.clone())); }
+            }
+        }
+    }
+    if !changed { return; }
+    for target in &new {
+        if old.iter().find(|previous| previous.id == target.id).map(|previous| previous.url.as_str()) != Some(target.url.as_str()) {
+            for (session, page_id) in &ctx.sessions {
+                if page_id == &target.id { glass_govern::record_connection_navigation(connection_id, session, &target.url); }
+            }
+        }
+    }
+    for connection in registry.values_mut() {
+        if connection.authorized {
+            let _ = connection.sender.send(ServerMessage::ObserverMessage(json!({"method":"Glass.targetsChanged", "params":{}}).to_string()));
+        }
+        if let Some(observation) = connection.observation.as_ref().filter(|o| o.owner_id == connection_id) {
+            let target = new.iter().find(|target| target.id == observation.target_id);
+            let previous = old.iter().find(|target| target.id == observation.target_id);
+            if let Some(target) = target {
+                if previous.map(|p| p.url != target.url || p.title != target.title).unwrap_or(true) {
+                    let _ = connection.sender.send(ServerMessage::ObserverMessage(json!({"method":"Glass.targetNavigated", "params":{"observationId": observation.id, "url":target.url, "title":target.title}}).to_string()));
+                }
+            } else {
+                let observation = connection.observation.take().unwrap();
+                let _ = owner.send(ServerMessage::ObserverStop { session: observation.session });
+                let _ = connection.sender.send(ServerMessage::ObserverMessage(json!({"method":"Glass.observationEnded", "params":{"observationId": observation.id, "reason":"target_closed"}}).to_string()));
+            }
+        }
+    }
 }
 
 pub async fn start(port: u16) -> anyhow::Result<()> {
@@ -154,6 +305,13 @@ pub async fn start_with_full_serve_options(
     .await
 }
 
+/// Observer configuration for an embedded server. The token is not persisted.
+#[derive(Clone, Default)]
+pub struct PaneObserverOptions {
+    pub token: Option<String>,
+    pub mirror_only: bool,
+}
+
 /// As `start_with_full_serve_options`, with an explicit cap on live CDP
 /// connections. Each connection owns an OS thread and its pages' V8 isolates,
 /// so this is what bounds the server's thread and memory footprint.
@@ -169,6 +327,35 @@ pub async fn start_with_serve_options_and_limit(
     allow_private_network: bool,
     max_connections: usize,
 ) -> anyhow::Result<()> {
+    let observer = PaneObserverOptions {
+        token: std::env::var("OMNIS_GLASS_PANE_OBSERVER_TOKEN").ok().filter(|s| !s.is_empty()),
+        mirror_only: false,
+    };
+    start_with_pane_observer_options(port, host, proxy, stealth, user_agent, allow_file_access,
+        storage_dir, allow_private_network, max_connections, observer).await
+}
+
+/// Start a server with an in-memory observer token supplied by the caller.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_with_pane_observer_options(
+    port: u16, host: &str, proxy: Option<String>, stealth: bool,
+    user_agent: Option<String>, allow_file_access: bool,
+    storage_dir: Option<std::path::PathBuf>, allow_private_network: bool,
+    max_connections: usize, observer: PaneObserverOptions,
+) -> anyhow::Result<()> {
+    start_with_cli_pane_observer_options(port, host, proxy, stealth, user_agent, allow_file_access,
+        storage_dir, allow_private_network, max_connections, observer, false).await
+}
+
+/// Serve variant that can print the observer token after the listener binds.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_with_cli_pane_observer_options(
+    port: u16, host: &str, proxy: Option<String>, stealth: bool,
+    user_agent: Option<String>, allow_file_access: bool,
+    storage_dir: Option<std::path::PathBuf>, allow_private_network: bool,
+    max_connections: usize, observer: PaneObserverOptions, print_observer_token: bool,
+) -> anyhow::Result<()> {
+    let observer = Arc::new(observer);
     let cdp_token = if crate::cdp_auth::cdp_auth_required() {
         std::env::var("OMNIS_GLASS_CDP_TOKEN").unwrap_or_else(|_| crate::cdp_auth::generate_cdp_token())
     } else {
@@ -208,6 +395,9 @@ pub async fn start_with_serve_options_and_limit(
             "OMNIS GLASS CDP token (required for WebSocket): {}",
             cdp_token
         );
+    }
+    if print_observer_token {
+        if let Some(token) = &observer.token { eprintln!("OMNIS GLASS pane observer token: {}", token); }
     }
     if allow_file_access {
         info!("file:// navigation enabled (--allow-file-access). Do not expose this port to untrusted networks.");
@@ -450,6 +640,7 @@ pub async fn start_with_serve_options_and_limit(
             persistence_lock.clone(),
             shutdown_notify.clone(),
             live_connections.clone(),
+            observer.clone(),
         );
     }
 
@@ -538,6 +729,7 @@ fn run_connection(
     persistence_lock: Arc<std::sync::Mutex<()>>,
     shutdown_notify: Arc<Notify>,
     live_connections: Arc<AtomicUsize>,
+    observer: Arc<PaneObserverOptions>,
 ) {
     // Releases the slot reserved by the accept loop when the thread unwinds,
     // however it exits — clean close, error return, or panic. A plain
@@ -580,8 +772,15 @@ fn run_connection(
                     }
                 };
                 let (msg_tx, msg_rx) = mpsc::unbounded_channel::<ServerMessage>();
+                let connection_id = uuid::Uuid::new_v4().to_string();
+                live_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(
+                    connection_id.clone(), LiveConnection { sender: msg_tx.clone(), targets: Vec::new(), sessions: std::collections::HashSet::new(), authorized: false, observation: None },
+                );
+                let _registry_guard = RegistryGuard(connection_id.clone());
                 let processor = tokio::task::spawn_local(cdp_processor(
                     msg_rx,
+                    connection_id,
+                    observer,
                     default_context,
                     shutdown_notify,
                 ));
@@ -863,10 +1062,13 @@ fn handle_http_json_blocking(
 /// merged into the persistence template when the connection thread exits.
 async fn cdp_processor(
     mut rx: mpsc::UnboundedReceiver<ServerMessage>,
+    connection_id: String,
+    observer: Arc<PaneObserverOptions>,
     default_context: Arc<obscura_browser::BrowserContext>,
     shutdown_notify: Arc<Notify>,
 ) {
     let mut ctx = CdpContext::new_with_shared_context(default_context);
+    let mut observer_authorized = false;
     let (itx, irx) = mpsc::unbounded_channel::<obscura_js::ops::InterceptedRequest>();
     ctx.intercept_tx = Some(itx);
     let mut intercept_rx: Option<mpsc::UnboundedReceiver<obscura_js::ops::InterceptedRequest>> = Some(irx);
@@ -910,6 +1112,8 @@ async fn cdp_processor(
             Some(d)
         } else {
             let screencast_active = has_active_screencast(&ctx);
+            let autonomous_target = ctx.pages.iter().find(|page| page.has_js()).map(|page| page.id.clone());
+            let allow_private = ctx.default_context.allow_private_network;
             let live_page_route = ctx
                 .pages
                 .iter()
@@ -931,7 +1135,9 @@ async fn cdp_processor(
                     tracing::info!("Shutdown signal received (connection processor)");
                     break;
                 },
-                pump_result = pump_live_page_event_loop(&mut ctx), if runtime_pump_armed => {
+                pump_result = glass_govern::with_dynamic_command_context(
+                    || autonomous_page_context(&connection_id, autonomous_target.as_deref(), allow_private),
+                    pump_live_page_event_loop(&mut ctx)), if runtime_pump_armed => {
                     match pump_result {
                         Ok(reached_idle) => {
                             runtime_pump_error_streak = 0;
@@ -950,6 +1156,7 @@ async fn cdp_processor(
                     dispatch::drain_binding_calls(&mut ctx);
                     dispatch::drain_frame_events(&mut ctx);
                     forward_pending_events(&mut ctx, connection_reply_tx.as_ref());
+                    update_target_snapshot(&connection_id, &ctx, None);
                     if let (Some(reply_tx), Some((session_id, url, method, body))) = (
                         connection_reply_tx.as_ref(),
                         take_live_pending_navigation(&ctx),
@@ -961,7 +1168,9 @@ async fn cdp_processor(
                             "sessionId": session_id,
                         })
                         .to_string();
-                        process_with_interception(
+                        let target = ctx.sessions.get(&session_id).cloned();
+                        let context = autonomous_page_context(&connection_id, target.as_deref(), ctx.default_context.allow_private_network);
+                        glass_govern::with_command_context(context, process_with_interception(
                             &navigation,
                             &mut ctx,
                             reply_tx,
@@ -970,8 +1179,9 @@ async fn cdp_processor(
                             &mut intercepted_paused,
                             &mut deferred,
                             false,
-                        )
+                        ))
                         .await;
+                        update_target_snapshot(&connection_id, &ctx, None);
                         runtime_pump_armed = ctx.pages.iter().any(|page| page.has_js());
                     }
                     None
@@ -1003,9 +1213,9 @@ async fn cdp_processor(
                     None
                 },
                 _ = screencast_tick.tick(), if screencast_active => {
-                    pump_and_forward_screencast_frames(
-                        &mut ctx,
-                        connection_reply_tx.as_ref(),
+                    glass_govern::with_dynamic_command_context(
+                        || autonomous_page_context(&connection_id, autonomous_target.as_deref(), allow_private),
+                        pump_and_forward_screencast_frames(&mut ctx, connection_reply_tx.as_ref()),
                     ).await;
                     None
                 }
@@ -1016,6 +1226,11 @@ async fn cdp_processor(
             continue;
         };
 
+        let active_target = match &msg {
+            ServerMessage::Cdp(message) => serde_json::from_str::<CdpRequest>(&message.text).ok()
+                .and_then(|req| req.session_id.and_then(|session| ctx.sessions.get(&session).cloned())),
+            _ => None,
+        };
         match msg {
             ServerMessage::NewConnection { reply_tx } => {
                 connection_reply_tx = Some(reply_tx.clone());
@@ -1024,7 +1239,116 @@ async fn cdp_processor(
                         .to_string(),
                 );
             }
+            ServerMessage::HumanCommand { observer_id, observation_id, request_id, method, params } => {
+                let session = {
+                    let registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+                    registry.get(&observer_id).and_then(|connection| connection.observation.as_ref())
+                        .filter(|observation| observation.id == observation_id && observation.owner_id == connection_id)
+                        .map(|observation| observation.session.clone())
+                };
+                let refusal = human_command_refusal(glass_govern::observer_mode().0, glass_govern::observer_owns_control(&observer_id), session.is_some());
+                if let Some(reason) = refusal {
+                    if let Some(connection) = live_registry().lock().unwrap_or_else(|e| e.into_inner()).get(&observer_id) {
+                        let response = crate::types::CdpResponse::error(request_id, -32000, reason.into(), None);
+                        let _ = connection.sender.send(ServerMessage::ObserverMessage(serde_json::to_string(&response).unwrap()));
+                    }
+                } else {
+                    let text = json!({"id":request_id, "method":method, "params":params, "sessionId":session.unwrap()}).to_string();
+                    let (human_tx, mut human_rx) = mpsc::unbounded_channel::<String>();
+                    let agent_tx = connection_reply_tx.clone();
+                    let receiver_id = observer_id.clone();
+                    let forward = tokio::task::spawn_local(async move {
+                        while let Some(text) = human_rx.recv().await {
+                            let parsed = serde_json::from_str::<serde_json::Value>(&text).ok();
+                            if parsed.as_ref().and_then(|v| v.get("id")).and_then(|v| v.as_u64()) == Some(request_id) {
+                                let mut response = parsed.unwrap();
+                                if let Some(object) = response.as_object_mut() { object.remove("sessionId"); }
+                                if let Some(error) = response.get_mut("error").and_then(|e| e.get_mut("message")) {
+                                    if let Some(message) = error.as_str() {
+                                        if let Some(index) = message.find("TERMINUS ") { *error = json!(message[index..]); }
+                                    }
+                                }
+                                if let Some(connection) = live_registry().lock().unwrap_or_else(|e| e.into_inner()).get(&receiver_id) {
+                                    let _ = connection.sender.send(ServerMessage::ObserverMessage(response.to_string()));
+                                }
+                            } else if let Some(agent_tx) = &agent_tx { let _ = agent_tx.send(text); }
+                        }
+                    });
+                    if method == "Page.navigate" {
+                        glass_govern::with_command_context(glass_govern::CommandContext::human().with_namespace(&connection_id).with_private_network(ctx.default_context.allow_private_network), process_with_interception(
+                            &text, &mut ctx, &human_tx, &mut rx, &mut intercept_rx, &mut intercepted_paused, &mut deferred, true,
+                        )).await;
+                    } else {
+                        glass_govern::with_command_context(glass_govern::CommandContext::human().with_namespace(&connection_id).with_private_network(ctx.default_context.allow_private_network), process_cdp_message(&text, &mut ctx, &human_tx, false)).await;
+                    }
+                    drop(human_tx);
+                    let _ = forward.await;
+                }
+            }
+            ServerMessage::ObserverMessage(text) => {
+                if let Some(reply_tx) = connection_reply_tx.as_ref() { let _ = reply_tx.send(text); }
+            }
+            ServerMessage::ObserverStart { observer_id, observation_id, target_id, params, request_id } => {
+                let session = format!("glass-observation-{observation_id}");
+                let active = live_registry().lock().unwrap_or_else(|e| e.into_inner()).get(&observer_id)
+                    .and_then(|connection| connection.observation.as_ref()).map(|observation| observation.id == observation_id).unwrap_or(false);
+                if active {
+                    ctx.sessions.insert(session.clone(), target_id.clone());
+                    if let Some(page) = ctx.get_page(&target_id) { glass_govern::record_connection_navigation(&connection_id, &session, &page.url_string()); }
+                    let options = json!({"format": params.get("format").cloned().unwrap_or(json!("jpeg")), "quality": params.get("quality").cloned().unwrap_or(json!(80))});
+                    let result = crate::domains::page::handle("startScreencast", &options, &mut ctx, &Some(session.clone())).await;
+                    if result.is_err() { ctx.sessions.remove(&session); }
+                    let mut registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(connection) = registry.get_mut(&observer_id) {
+                        if result.is_err() && connection.observation.as_ref().map(|o| o.id.as_str()) == Some(observation_id.as_str()) { connection.observation = None; }
+                        let response = match result {
+                            Ok(_) => crate::types::CdpResponse::success(request_id, json!({"observationId": observation_id}), None),
+                            Err(error) => crate::types::CdpResponse::error(request_id, -32000, error, None),
+                        };
+                        let _ = connection.sender.send(ServerMessage::ObserverMessage(serde_json::to_string(&response).unwrap()));
+                    }
+                    drop(registry);
+                    forward_pending_events(&mut ctx, connection_reply_tx.as_ref());
+                }
+            }
+            ServerMessage::ObserverStop { session } => {
+                let _ = crate::domains::page::handle("stopScreencast", &json!({}), &mut ctx, &Some(session.clone())).await;
+                ctx.sessions.remove(&session);
+            }
+            ServerMessage::ObserverAck { session, stream_id } => {
+                let _ = crate::domains::page::handle("screencastFrameAck", &json!({"sessionId": stream_id}), &mut ctx, &Some(session)).await;
+            }
             ServerMessage::Cdp(cdp_msg) => {
+                if let Ok(req) = serde_json::from_str::<CdpRequest>(&cdp_msg.text) {
+                    if req.method.starts_with("Glass.") {
+                        let response = glass_observer_command(&req, &observer, &mut observer_authorized, &connection_id);
+                        if let Some(response) = response {
+                            if let Ok(text) = serde_json::to_string(&response) {
+                                let _ = cdp_msg.reply_tx.send(text);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                if glass_govern::agent_blocked() && !glass_govern::observer_owns_control(&connection_id) {
+                    if let Ok(req) = serde_json::from_str::<CdpRequest>(&cdp_msg.text) {
+                        if !allowed_during_human_control(&req.method) {
+                            let waiting_before = glass_govern::observer_mode().1;
+                            let context = glass_govern::CommandContext::agent().with_namespace(&connection_id).with_private_network(ctx.default_context.allow_private_network);
+                            let block = glass_govern::with_command_context(context, async {
+                                crate::glass::gate_cdp_command(&req.method, &req.params, &req.session_id)
+                            }).await.unwrap_or_else(|| {
+                                glass_govern::mark_agent_waiting();
+                                "TERMINUS REFUSE (session_locked): REFUSE_SESSION_LOCKED".into()
+                            });
+                            let response = crate::types::CdpResponse::error(req.id, -32603, block, req.session_id.clone());
+                            let _ = cdp_msg.reply_tx.send(serde_json::to_string(&response).unwrap());
+                            if !waiting_before && glass_govern::observer_mode().1 { broadcast_mode_changed(); }
+                            continue;
+                        }
+                    }
+                }
+                let waiting_before = glass_govern::observer_mode().1;
                 // Route every Page.navigate through the spawn-and-defer path,
                 // not just intercepted ones. Holding the V8 lock across a
                 // multi-second navigate inside the regular dispatch wedges the
@@ -1036,11 +1360,11 @@ async fn cdp_processor(
                 let is_navigation = is_navigate_method(&cdp_msg.text);
 
                 if is_navigation {
-                    process_with_interception(
+                    glass_govern::with_command_context(glass_govern::CommandContext::agent().with_namespace(&connection_id).with_private_network(ctx.default_context.allow_private_network), process_with_interception(
                         &cdp_msg.text, &mut ctx, &cdp_msg.reply_tx, &mut rx,
                         &mut intercept_rx, &mut intercepted_paused,
                         &mut deferred, true,
-                    ).await;
+                    )).await;
                 } else {
                     let fetch_was_resolved = cdp_msg.text.contains("Fetch.")
                         && handle_fetch_resolution(
@@ -1050,15 +1374,17 @@ async fn cdp_processor(
                             &mut intercepted_paused,
                         );
                     if !fetch_was_resolved {
-                        process_cdp_message(&cdp_msg.text, &mut ctx, &cdp_msg.reply_tx).await;
+                        glass_govern::with_command_context(glass_govern::CommandContext::agent().with_namespace(&connection_id).with_private_network(ctx.default_context.allow_private_network), process_cdp_message(&cdp_msg.text, &mut ctx, &cdp_msg.reply_tx, true)).await;
                     }
                 }
+                if !waiting_before && glass_govern::observer_mode().1 { broadcast_mode_changed(); }
             }
         }
 
         // Dispatch may have created a page or scheduled new asynchronous work.
         // A single live isolate is the connection's current active target; the
         // pump will park cheaply if its next task is a distant timer.
+        update_target_snapshot(&connection_id, &ctx, active_target.as_deref());
         runtime_pump_armed = ctx.pages.iter().any(|page| page.has_js());
         runtime_pump_error_streak = 0;
 
@@ -1067,6 +1393,164 @@ async fn cdp_processor(
     // The connection thread merges this context's cookie delta into the
     // persistence template after the processor stops.
     let _ = &ctx;
+}
+
+fn mode_result() -> serde_json::Value {
+    let (mode, waiting) = glass_govern::observer_mode();
+    json!({"mode": if mode == glass_govern::PaneMode::Human { "human" } else { "mirror" }, "agentWaiting": waiting})
+}
+
+fn mode_changed_event() -> String {
+    json!({"method":"Glass.modeChanged", "params":mode_result()}).to_string()
+}
+
+fn broadcast_mode_changed() {
+    let event = mode_changed_event();
+    let registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+    for connection in registry.values().filter(|connection| connection.authorized) {
+        let _ = connection.sender.send(ServerMessage::ObserverMessage(event.clone()));
+    }
+}
+
+// Every form of every method here must avoid executing page JavaScript.
+fn allowed_during_human_control(method: &str) -> bool {
+    matches!(method,
+        "Browser.getVersion" // Returns constant browser metadata.
+        | "Target.getTargets" // Reads Rust page fields.
+        | "Target.getTargetInfo" // Reads Rust page fields or constant browser metadata.
+        | "Target.attachToTarget" // Updates session maps and reads Rust page fields.
+        | "Target.detachFromTarget" // Updates session maps, screencasts, and a Rust event flag.
+        | "Page.getNavigationHistory" // Reads Rust history and page fields.
+        | "Page.getFrameTree" // Reads Rust frame and page fields.
+        | "DOM.getDocument" // Serializes the Rust DOM; does not resolve object IDs.
+        | "DOM.getAttributes" // No handler exists; the DOM dispatcher returns an error.
+    )
+}
+
+fn glass_observer_command(
+    req: &CdpRequest, options: &PaneObserverOptions, authorized: &mut bool, connection_id: &str,
+) -> Option<crate::types::CdpResponse> {
+    use subtle::ConstantTimeEq;
+    let error = |message: &str| crate::types::CdpResponse::error(req.id, -32000, message.into(), req.session_id.clone());
+    let Some(expected) = options.token.as_ref().filter(|token| !token.is_empty()) else {
+        return Some(error("OBSERVER_DISABLED"));
+    };
+    if req.session_id.is_some() { return Some(error("Glass methods require browser-level commands")); }
+    if req.method == "Glass.authorizeObserver" {
+        let given = req.params.get("token").and_then(|v| v.as_str()).unwrap_or("");
+        if given.as_bytes().len() != expected.as_bytes().len()
+            || !bool::from(given.as_bytes().ct_eq(expected.as_bytes())) {
+            return Some(error("OBSERVER_TOKEN_INVALID"));
+        }
+        *authorized = true;
+        if let Some(connection) = live_registry().lock().unwrap_or_else(|e| e.into_inner()).get_mut(connection_id) { connection.authorized = true; }
+        let state_dir = glass_govern::state_dir();
+        let absolute_dir = if state_dir.is_absolute() { Some(state_dir) } else { std::env::current_dir().ok().map(|dir| dir.join(state_dir)) };
+        let ledger = absolute_dir.unwrap_or_default().join("browser.actions.jsonl");
+        let canonical = std::fs::canonicalize(&ledger).ok().or_else(|| {
+            let mut parent = ledger.parent()?;
+            let mut missing = Vec::new();
+            let mut existing = loop {
+                if let Ok(path) = std::fs::canonicalize(parent) { break path; }
+                missing.push(parent.file_name()?.to_os_string());
+                parent = parent.parent()?;
+            };
+            for component in missing.iter().rev() { existing.push(component); }
+            Some(existing.join("browser.actions.jsonl"))
+        });
+        use sha2::Digest;
+        let ledger_hash = canonical.as_ref().map(|path| hex::encode(sha2::Sha256::digest(path.as_os_str().as_encoded_bytes())));
+        return Some(crate::types::CdpResponse::success(req.id, json!({"ok": true, "actionsLedgerPathSha256": ledger_hash}), None));
+    }
+    if !*authorized { return Some(error("OBSERVER_NOT_AUTHORIZED")); }
+    if req.method == "Glass.getMode" {
+        return Some(crate::types::CdpResponse::success(req.id, mode_result(), None));
+    }
+    if req.method == "Glass.takeControl" {
+        if options.mirror_only { return Some(error("MIRROR_ONLY")); }
+        let cancelled = match glass_govern::take_observer_control(connection_id) {
+            Ok(cancelled) => cancelled,
+            Err(reason) => return Some(error(reason)),
+        };
+        for action in &cancelled { glass_govern::record_handoff_cancel(action); }
+        broadcast_mode_changed();
+        return Some(crate::types::CdpResponse::success(req.id, json!({"mode":"human", "cancelledAction":cancelled.first()}), None));
+    }
+    if req.method == "Glass.release" {
+        if !glass_govern::release_observer_control(connection_id) { return Some(error("NOT_CONTROL_OWNER")); }
+        broadcast_mode_changed();
+        return Some(crate::types::CdpResponse::success(req.id, json!({"mode":"mirror"}), None));
+    }
+    if req.method == "Glass.listTargets" {
+        let registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+        let targets: Vec<_> = registry.iter().flat_map(|(id, connection)| connection.targets.iter().map(move |target| json!({
+            "connectionId": id, "targetId": target.id, "url": target.url,
+            "title": target.title, "lastActivityMs": target.last_activity_ms, "scriptsStopped": target.scripts_stopped,
+        }))).collect();
+        return Some(crate::types::CdpResponse::success(req.id, json!({"targets": targets}), None));
+    }
+    if req.method == "Glass.humanCommand" {
+        if glass_govern::observer_mode().0 != glass_govern::PaneMode::Human { return Some(error("NOT_HUMAN_MODE")); }
+        if !glass_govern::observer_owns_control(connection_id) { return Some(error("NOT_CONTROL_OWNER")); }
+        let registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+        let Some(observation) = registry.get(connection_id).and_then(|connection| connection.observation.as_ref()) else { return Some(error("NO_OBSERVATION")); };
+        let method = req.params.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        if !matches!(method, "Page.navigate" | "Page.reload" | "Page.getNavigationHistory" | "Page.navigateToHistoryEntry" | "Input.dispatchMouseEvent" | "Input.dispatchKeyEvent") { return Some(error("METHOD_NOT_ALLOWED")); }
+        let Some(owner) = registry.get(&observation.owner_id) else { return Some(error("NO_OBSERVATION")); };
+        if owner.sender.send(ServerMessage::HumanCommand { observer_id: connection_id.into(), observation_id: observation.id.clone(), request_id: req.id, method: method.into(), params: req.params.get("params").cloned().unwrap_or(json!({})) }).is_err() { return Some(error("NO_OBSERVATION")); }
+        return None;
+    }
+    if req.method == "Glass.observe" {
+        if req.params.get("format").map(|v| v.as_str() != Some("jpeg")).unwrap_or(false) {
+            return Some(error("Invalid parameters: observer format must be jpeg"));
+        }
+        let owner_id = req.params.get("connectionId").and_then(|v| v.as_str()).unwrap_or("");
+        let target_id = req.params.get("targetId").and_then(|v| v.as_str()).unwrap_or("");
+        let mut registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+        let owner = match registry.get(owner_id) {
+            Some(owner) if owner.targets.iter().any(|target| target.id == target_id) => owner.sender.clone(),
+            _ => return Some(error("TARGET_NOT_FOUND")),
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let session = format!("glass-observation-{id}");
+        let previous = registry.get_mut(connection_id).and_then(|connection| connection.observation.take());
+        if let Some(previous) = previous {
+            if let Some(old_owner) = registry.get(&previous.owner_id) {
+                let _ = old_owner.sender.send(ServerMessage::ObserverStop { session: previous.session });
+            }
+            if let Some(connection) = registry.get(connection_id) {
+                let _ = connection.sender.send(ServerMessage::ObserverMessage(json!({"method":"Glass.observationEnded", "params":{"observationId": previous.id, "reason":"replaced"}}).to_string()));
+            }
+        }
+        let Some(connection) = registry.get_mut(connection_id) else { return Some(error("TARGET_NOT_FOUND")); };
+        connection.observation = Some(Observation { id: id.clone(), owner_id: owner_id.to_string(), target_id: target_id.to_string(), session, next_frame: 0, unacked: HashMap::new() });
+        if owner.send(ServerMessage::ObserverStart { observer_id: connection_id.into(), observation_id: id, target_id: target_id.into(), params: req.params.clone(), request_id: req.id }).is_err() {
+            connection.observation = None;
+            return Some(error("TARGET_NOT_FOUND"));
+        }
+        return None;
+    }
+    if req.method == "Glass.stopObserving" {
+        let mut registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+        let old = registry.get_mut(connection_id).and_then(|connection| connection.observation.take());
+        if let Some(old) = old {
+            if let Some(owner) = registry.get(&old.owner_id) { let _ = owner.sender.send(ServerMessage::ObserverStop { session: old.session }); }
+        }
+        return Some(crate::types::CdpResponse::success(req.id, json!({}), None));
+    }
+    if req.method == "Glass.frameAck" {
+        let mut registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+        let ack = registry.get_mut(connection_id).and_then(|connection| connection.observation.as_mut()).and_then(|observation| {
+            if req.params.get("observationId").and_then(|v| v.as_str()) != Some(observation.id.as_str()) { return None; }
+            let frame = req.params.get("frameId").and_then(|v| v.as_u64())?;
+            observation.unacked.remove(&frame).map(|stream_id| (observation.owner_id.clone(), observation.session.clone(), stream_id))
+        });
+        if let Some((owner_id, session, stream_id)) = ack {
+            if let Some(owner) = registry.get(&owner_id) { let _ = owner.sender.send(ServerMessage::ObserverAck { session, stream_id }); }
+        }
+        return Some(crate::types::CdpResponse::success(req.id, json!({}), None));
+    }
+    Some(error("Unknown Glass method"))
 }
 
 fn emit_intercepted_request(
@@ -1188,12 +1672,30 @@ fn forward_pending_events(
     ctx: &mut CdpContext,
     reply_tx: Option<&mpsc::UnboundedSender<String>>,
 ) {
-    let Some(reply_tx) = reply_tx else {
-        return;
-    };
-    for event in ctx.pending_events.drain(..) {
-        if let Ok(json) = serde_json::to_string(&event) {
-            let _ = reply_tx.send(json);
+    let events = std::mem::take(&mut ctx.pending_events);
+    for event in events {
+        if event.session_id.as_deref().map(|id| id.starts_with("glass-observation-")).unwrap_or(false) {
+            if event.method != "Page.screencastFrame" { continue; }
+            let mut registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+            for connection in registry.values_mut() {
+                let Some(observation) = connection.observation.as_mut() else { continue; };
+                if Some(observation.session.as_str()) != event.session_id.as_deref() { continue; }
+                let Some(stream_id) = event.params.get("sessionId").and_then(|v| v.as_i64()) else { break; };
+                observation.next_frame = observation.next_frame.saturating_add(1);
+                let frame_id = observation.next_frame;
+                observation.unacked.insert(frame_id, stream_id);
+                let metadata = &event.params["metadata"];
+                let _ = connection.sender.send(ServerMessage::ObserverMessage(json!({"method":"Glass.frame", "params":{
+                    "observationId":observation.id, "frameId":frame_id, "data":event.params["data"],
+                    "metadata":{"deviceWidth":metadata["deviceWidth"], "deviceHeight":metadata["deviceHeight"], "timestamp":metadata["timestamp"]}
+                }}).to_string()));
+                break;
+            }
+        } else if let Some(reply_tx) = reply_tx {
+            if let Ok(json) = serde_json::to_string(&event) { let _ = reply_tx.send(json); }
+        } else {
+            // Callers without a sink use this helper to retain queued events.
+            ctx.pending_events.push(event);
         }
     }
 }
@@ -1305,6 +1807,20 @@ fn handle_fetch_resolution(
     false
 }
 
+fn send_action_response(
+    action: Option<glass_govern::AgentAction>,
+    response: crate::types::CdpResponse,
+    reply_tx: &mpsc::UnboundedSender<String>,
+) {
+    let publish = |cancelled| {
+        let response = if cancelled {
+            crate::types::CdpResponse::error(response.id, -32000, "cancelled_by_handoff".into(), response.session_id.clone())
+        } else { response };
+        if let Ok(text) = serde_json::to_string(&response) { let _ = reply_tx.send(text); }
+    };
+    if let Some(action) = action { action.finish_with(publish); } else { publish(false); }
+}
+
 async fn process_with_interception(
     text: &str,
     ctx: &mut CdpContext,
@@ -1325,6 +1841,32 @@ async fn process_with_interception(
 
     tracing::info!("INTERCEPTION navigate: {} (id={})", req.method, req.id);
 
+    let agent_action = if glass_govern::command_context().map(|c| c.driver) != Some(glass_govern::Driver::Human) {
+        match glass_govern::begin_agent_action("navigate") {
+            Ok(action) => Some(action),
+            Err(block) => {
+                if !send_command_response {
+                    // The session already refused this action. Do not re-gate
+                    // after a possible release and accidentally record ALLOW.
+                    let url = req.params.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    let _ = glass_govern::record_session_locked_refusal("navigate", url);
+                }
+                if send_command_response {
+                    let response = crate::types::CdpResponse::error(req.id, -32603, block.into(), req.session_id.clone());
+                    let _ = reply_tx.send(serde_json::to_string(&response).unwrap());
+                }
+                broadcast_mode_changed();
+                return;
+            }
+        }
+    } else { None };
+    if let Some(block) = crate::glass::gate_cdp_command(&req.method, &req.params, &req.session_id) {
+        if send_command_response {
+            let response = crate::types::CdpResponse::error(req.id, -32603, block, req.session_id.clone());
+            send_action_response(agent_action, response, reply_tx);
+        }
+        return;
+    }
     let session_id = &req.session_id;
     let page_id = session_id
         .as_ref()
@@ -1334,7 +1876,7 @@ async fn process_with_interception(
     let page_id = match page_id {
         Some(id) => id,
         None => {
-            process_cdp_message(text, ctx, reply_tx).await;
+            process_cdp_message(text, ctx, reply_tx, false).await;
             return;
         }
     };
@@ -1343,7 +1885,7 @@ async fn process_with_interception(
     let mut page = match page_index {
         Some(idx) => ctx.pages.remove(idx),
         None => {
-            process_cdp_message(text, ctx, reply_tx).await;
+            process_cdp_message(text, ctx, reply_tx, false).await;
             return;
         }
     };
@@ -1382,7 +1924,8 @@ async fn process_with_interception(
     let url_owned = url.to_string();
     let nav_v8_lock = ctx.v8_lock.clone();
 
-    tokio::task::spawn_local(async move {
+    let nav_context = glass_govern::command_context().unwrap_or_else(glass_govern::CommandContext::agent);
+    tokio::task::spawn_local(glass_govern::with_command_context(nav_context, async move {
         // Issue #19: serialize this connection's V8 work across its pages. This
         // nav task runs while the connection's processor keeps pumping other CDP
         // messages via `dispatch` (which takes the same per-connection lock), so
@@ -1401,7 +1944,7 @@ async fn process_with_interception(
         .map_err(|e| e.to_string());
         drop(_v8_guard);
         let _ = nav_done_tx.send((page, result)).await;
-    });
+    }));
 
     let navigate_result: Result<(), String>;
     let page_back: Option<obscura_browser::Page>;
@@ -1497,6 +2040,37 @@ async fn process_with_interception(
                             }
                         }
                     }
+                    ServerMessage::ObserverMessage(text) => { let _ = reply_tx.send(text); }
+                    ServerMessage::ObserverStop { session } => {
+                        #[cfg(feature = "render")]
+                        ctx.screencasts.remove(&session);
+                        ctx.sessions.remove(&session);
+                    }
+                    ServerMessage::ObserverAck { session, stream_id } => {
+                        #[cfg(feature = "render")]
+                        if let Some(state) = ctx.screencasts.get_mut(&session) {
+                            if state.session_id == stream_id { state.frames_in_flight = state.frames_in_flight.saturating_sub(1); }
+                        }
+                        #[cfg(not(feature = "render"))]
+                        let _ = (session, stream_id);
+                    }
+                    other => {
+                        if deferred.len() < MAX_DEFERRED_MESSAGES {
+                            deferred.push_back(other);
+                        } else {
+                            let (observer_id, request_id, observation_id) = match other {
+                                ServerMessage::ObserverStart { observer_id, request_id, observation_id, .. } => (observer_id, request_id, Some(observation_id)),
+                                ServerMessage::HumanCommand { observer_id, request_id, .. } => (observer_id, request_id, None),
+                                _ => unreachable!(),
+                            };
+                            let mut registry = live_registry().lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(connection) = registry.get_mut(&observer_id) {
+                                if observation_id.as_deref().is_some() && connection.observation.as_ref().map(|o| o.id.as_str()) == observation_id.as_deref() { connection.observation = None; }
+                                let response = crate::types::CdpResponse::error(request_id, -32000, "Server busy: navigation in progress, try again later".into(), None);
+                                let _ = connection.sender.send(ServerMessage::ObserverMessage(serde_json::to_string(&response).unwrap()));
+                            }
+                        }
+                    },
                 }
             }
         }
@@ -1529,11 +2103,7 @@ async fn process_with_interception(
         Err(e) => crate::types::CdpResponse::error(req.id, -32000, e, req.session_id.clone()),
     };
 
-    if send_command_response {
-        if let Ok(json) = serde_json::to_string(&response) {
-            let _ = reply_tx.send(json);
-        }
-    }
+    if send_command_response { send_action_response(agent_action, response, reply_tx); }
 
     // Shared event emission: includes the post-#190 Network.requestWillBeSent
     // -before-frameNavigated ordering, the #189 requestId=loaderId trick that
@@ -1553,16 +2123,36 @@ async fn process_with_interception(
     );
     #[cfg(feature = "render")]
     if navigation_succeeded {
+        crate::domains::page::invalidate_target_screencasts(ctx, &session_for_events);
         if let Err(error) = crate::domains::page::queue_screencast_frame(
             ctx, &session_for_events, false,
         ) {
             tracing::warn!("could not produce post-navigation screencast frame: {error}");
         }
     }
-    for event in ctx.pending_events.drain(..) {
-        if let Ok(json) = serde_json::to_string(&event) {
-            let _ = reply_tx.send(json);
-        }
+    forward_pending_events(ctx, Some(reply_tx));
+}
+
+fn human_command_refusal(mode: glass_govern::PaneMode, owns_control: bool, has_observation: bool) -> Option<&'static str> {
+    if mode != glass_govern::PaneMode::Human { Some("NOT_HUMAN_MODE") }
+    else if !owns_control { Some("NOT_CONTROL_OWNER") }
+    else if !has_observation { Some("NO_OBSERVATION") } else { None }
+}
+
+fn governed_action(req: &CdpRequest) -> Option<&'static str> {
+    match req.method.as_str() {
+        "Runtime.evaluate" | "Runtime.callFunctionOn" => Some("eval"),
+        "Page.reload" | "Page.navigateToHistoryEntry" => Some("navigate"),
+        "Target.createTarget" if req.params.get("url").and_then(|v| v.as_str()).map(|url| !url.is_empty() && url != "about:blank").unwrap_or(false) => Some("navigate"),
+        "Input.insertText" => Some("type"),
+        "Input.dispatchKeyEvent" if !req.params.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty() => Some("type"),
+        "DOM.setFileInputFiles" => Some("upload"),
+        "Storage.setCookies" | "Network.setCookies" | "Storage.clearCookies" | "Storage.deleteCookies" => Some("storage-write"),
+        "Fetch.continueRequest" if req.params.get("postData").and_then(|v| v.as_str()).is_some() => Some("submit"),
+        "Target.sendMessageToTarget" => req.params.get("message").and_then(|v| v.as_str())
+            .and_then(|message| serde_json::from_str::<CdpRequest>(message).ok())
+            .and_then(|inner| governed_action(&inner)),
+        _ => None,
     }
 }
 
@@ -1570,6 +2160,7 @@ async fn process_cdp_message(
     text: &str,
     ctx: &mut CdpContext,
     reply_tx: &mpsc::UnboundedSender<String>,
+    track_agent: bool,
 ) {
     let req: CdpRequest = match serde_json::from_str(text) {
         Ok(r) => r,
@@ -1581,6 +2172,19 @@ async fn process_cdp_message(
 
     tracing::debug!("CDP: {} (id={}, s={:?})", req.method, req.id, req.session_id);
 
+    let action = if track_agent {
+        if let Some(action) = governed_action(&req) {
+            match glass_govern::begin_agent_action(action) {
+                Ok(action) => Some(action),
+                Err(reason) => {
+                    let response = crate::types::CdpResponse::error(req.id, -32603, reason.into(), req.session_id.clone());
+                    let _ = reply_tx.send(serde_json::to_string(&response).unwrap());
+                    broadcast_mode_changed();
+                    return;
+                }
+            }
+        } else { None }
+    } else { None };
     let response = dispatch::dispatch(&req, ctx).await;
 
     // Chromium CDP semantics: events emitted as a side-effect of a command
@@ -1589,15 +2193,9 @@ async fn process_cdp_message(
     // Playwright awaits the response and immediately reads state wired up
     // by those events; if the response lands first, accessing
     // Target._page errors with "Cannot read properties of undefined".
-    for event in ctx.pending_events.drain(..) {
-        if let Ok(json) = serde_json::to_string(&event) {
-            let _ = reply_tx.send(json);
-        }
-    }
+    forward_pending_events(ctx, Some(reply_tx));
 
-    if let Ok(json) = serde_json::to_string(&response) {
-        let _ = reply_tx.send(json);
-    }
+    send_action_response(action, response, reply_tx);
 
     if let Some((nav_url, nav_method, nav_body)) = check_pending_navigation(ctx, &req.session_id) {
         tracing::info!("JS-triggered nav: {} {} (body: {} bytes)", nav_method, nav_url, nav_body.len());
@@ -1608,11 +2206,7 @@ async fn process_cdp_message(
             session_id: req.session_id.clone(),
         };
         let _ = dispatch::dispatch(&nav_req, ctx).await;
-        for event in ctx.pending_events.drain(..) {
-            if let Ok(json) = serde_json::to_string(&event) {
-                let _ = reply_tx.send(json);
-            }
-        }
+        forward_pending_events(ctx, Some(reply_tx));
     }
 }
 
@@ -1770,6 +2364,61 @@ async fn handle_connection_ws(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn script_state_notification_does_not_write_receipts() {
+        let _state = crate::server::glass_fixture_env::isolated_state();
+        let mut ctx = crate::dispatch::CdpContext::new();
+        let id = ctx.create_page();
+        ctx.get_page_mut(&id).unwrap().resume_js();
+        let (owner_tx, _owner_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (unauthorized_tx, mut unauthorized_rx) = tokio::sync::mpsc::unbounded_channel();
+        let connection = |sender, authorized| super::LiveConnection {
+            sender, targets: Vec::new(), sessions: Default::default(), authorized, observation: None,
+        };
+        {
+            let mut registry = super::live_registry().lock().unwrap();
+            registry.insert("test-owner".into(), connection(owner_tx, false));
+            registry.insert("test-observer".into(), connection(observer_tx, true));
+            registry.insert("test-unauthorized".into(), connection(unauthorized_tx, false));
+        }
+        super::update_target_snapshot("test-owner", &ctx, None);
+        while observer_rx.try_recv().is_ok() {}
+        fn files(path: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+            let mut out = Vec::new();
+            for entry in std::fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() { out.extend(files(&path)); }
+                else { out.push((path.clone(), std::fs::read(path).unwrap())); }
+            }
+            out.sort();
+            out
+        }
+        let state_dir = glass_govern::state_dir();
+        let before = files(&state_dir);
+        ctx.get_page_mut(&id).unwrap().suspend_js();
+        super::update_target_snapshot("test-owner", &ctx, None);
+        let event = observer_rx.try_recv().expect("authorized observer event");
+        match event {
+            super::ServerMessage::ObserverMessage(text) => assert!(text.contains("Glass.scriptsStoppedChanged")),
+            _ => panic!("unexpected observer message"),
+        }
+        assert!(unauthorized_rx.try_recv().is_err());
+        assert_eq!(files(&state_dir), before, "script state notification wrote a receipt");
+        let mut registry = super::live_registry().lock().unwrap();
+        registry.remove("test-owner");
+        registry.remove("test-observer");
+        registry.remove("test-unauthorized");
+    }
+
+    #[test]
+    fn human_command_owner_checks_all_preconditions_in_order() {
+        use glass_govern::PaneMode;
+        assert_eq!(super::human_command_refusal(PaneMode::Mirror, false, false), Some("NOT_HUMAN_MODE"));
+        assert_eq!(super::human_command_refusal(PaneMode::Human, false, false), Some("NOT_CONTROL_OWNER"));
+        assert_eq!(super::human_command_refusal(PaneMode::Human, true, false), Some("NO_OBSERVATION"));
+        assert_eq!(super::human_command_refusal(PaneMode::Human, true, true), None);
+    }
     use super::{
         handle_fetch_resolution, is_navigate_method, merge_cookie_delta, parse_cdp_headers,
     };
@@ -1778,6 +2427,62 @@ mod tests {
     use obscura_net::{CookieInfo, CookieJar};
     use serde_json::json;
     use std::collections::HashMap;
+
+    // The registry is private: this test exercises it through real sockets while
+    // inspecting snapshots in-process, before the observer API exists.
+    #[test]
+    fn registry_tracks_two_connections_and_removes_disconnected_targets() {
+        let _glass_isolated_state = crate::server::glass_fixture_env::isolated_state();
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::{connect_async, tungstenite::Message};
+        std::env::set_var("OMNIS_GLASS_CDP_AUTH", "1");
+        std::env::set_var("OMNIS_GLASS_CDP_TOKEN", "registry-test-token");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, async {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            tokio::task::spawn_local(async move {
+                let _ = super::start_with_serve_options_and_limit(
+                    port, "127.0.0.1", None, false, None, false, None, true, 8,
+                ).await;
+            });
+            let url = format!("ws://127.0.0.1:{port}/devtools/browser/registry-test-token");
+            let (mut first, _) = loop {
+                match connect_async(&url).await {
+                    Ok(socket) => break socket,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                }
+            };
+            let (mut second, _) = connect_async(&url).await.unwrap();
+            for socket in [&mut first, &mut second] {
+                socket.send(Message::Text(json!({"id": 1, "method": "Target.createTarget", "params": {"url": "about:blank"}}).to_string().into())).await.unwrap();
+                loop {
+                    let value: serde_json::Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+                    if value["id"] == 1 { assert!(value["result"]["targetId"].is_string()); break; }
+                }
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let count = super::live_registry().lock().unwrap().values().filter(|connection| {
+                        connection.targets.iter().any(|target| target.id == "page-1" && target.url == "about:blank" && target.last_activity_ms > 0)
+                    }).count();
+                    if count == 2 { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }).await.expect("both connection snapshots must be visible");
+            first.close(None).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let count = super::live_registry().lock().unwrap().len();
+                    if count == 1 { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }).await.expect("closed connection must leave registry");
+            second.close(None).await.unwrap();
+        });
+    }
 
     fn cookie(name: &str, value: &str) -> CookieInfo {
         CookieInfo {
@@ -1794,6 +2499,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn page_runtime_advances_while_cdp_client_is_silent() {
+        let state = tempfile::tempdir().unwrap();
+        std::env::set_var("OMNIS_GLASS_STATE_DIR", state.path());
+        std::env::set_var("OMNIS_GLASS_ENFORCE", "local_only");
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (server_tx, server_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1802,6 +2510,8 @@ mod tests {
                 let default_context = crate::dispatch::CdpContext::new().default_context;
                 let processor = tokio::task::spawn_local(super::cdp_processor(
                     server_rx,
+                    "test-connection".into(),
+                    std::sync::Arc::new(super::PaneObserverOptions::default()),
                     default_context,
                     shutdown,
                 ));
@@ -1918,6 +2628,7 @@ mod tests {
 
     #[test]
     fn cookie_delta_merges_changes_without_reverting_other_connections() {
+        let _glass_isolated_state = crate::server::glass_fixture_env::isolated_state();
         let destination = CookieJar::new();
         destination.set_cookies_from_cdp(vec![cookie("sid", "newer"), cookie("other", "kept")]);
         let initial = vec![cookie("sid", "old"), cookie("removed", "old")];
@@ -1939,6 +2650,7 @@ mod tests {
     // its real handler.
     #[test]
     fn only_exact_page_navigate_routes_as_navigation() {
+        let _glass_isolated_state = crate::server::glass_fixture_env::isolated_state();
         assert!(is_navigate_method(
             r#"{"id":1,"method":"Page.navigate","params":{"url":"https://example.com"}}"#
         ));
@@ -1952,6 +2664,7 @@ mod tests {
     // navigation.
     #[test]
     fn unrelated_methods_do_not_route_as_navigation() {
+        let _glass_isolated_state = crate::server::glass_fixture_env::isolated_state();
         assert!(!is_navigate_method(
             r#"{"id":3,"method":"Runtime.evaluate","params":{"expression":"'Page.navigate'"}}"#
         ));
@@ -1962,6 +2675,7 @@ mod tests {
     // CDP `[{name, value}]` list so they can be applied to the outgoing request.
     #[test]
     fn parse_cdp_headers_reads_name_value_pairs() {
+        let _glass_isolated_state = crate::server::glass_fixture_env::isolated_state();
         let params = json!({
             "headers": [
                 {"name": "X-A", "value": "1"},
@@ -1977,11 +2691,13 @@ mod tests {
     // None, not an empty map that would clear them.
     #[test]
     fn parse_cdp_headers_absent_is_none() {
+        let _glass_isolated_state = crate::server::glass_fixture_env::isolated_state();
         assert!(parse_cdp_headers(&json!({"url": "https://example.com"})).is_none());
     }
 
     #[test]
     fn fetch_resolution_is_handled_once_by_the_outer_processor() {
+        let _glass_isolated_state = crate::server::glass_fixture_env::isolated_state();
         let (resolution_tx, mut resolution_rx) = tokio::sync::oneshot::channel();
         let mut paused = HashMap::from([("request-1".to_string(), resolution_tx)]);
         let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -2006,6 +2722,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn autonomous_screencast_pumps_timers_and_retains_backpressured_damage() {
+        let _glass_isolated_state = crate::server::glass_fixture_env::isolated_state();
         let mut ctx = crate::dispatch::CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = format!("{page_id}-session");
@@ -2095,6 +2812,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn autonomous_screencast_observes_raf_visual_mutations() {
+        let _glass_isolated_state = crate::server::glass_fixture_env::isolated_state();
         let mut ctx = crate::dispatch::CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = format!("{page_id}-session");
@@ -2163,3 +2881,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

@@ -76,6 +76,7 @@ async fn eval(ctx: &mut CdpContext, session_id: &str, expression: &str) -> Value
 
 #[tokio::test(flavor = "current_thread")]
 async fn next_node_walks_the_whole_subtree_in_document_order() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, session_id) = setup().await;
     let value = eval(
         &mut ctx,
@@ -99,6 +100,7 @@ async fn next_node_walks_the_whole_subtree_in_document_order() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn next_node_keeps_searching_after_filtered_leaf_nodes() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, session_id) = setup().await;
     let value = eval(
         &mut ctx,
@@ -128,6 +130,7 @@ async fn next_node_keeps_searching_after_filtered_leaf_nodes() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn next_node_handles_a_deep_accepted_child_fast_path() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, session_id) = setup().await;
     let value = eval(
         &mut ctx,
@@ -150,3 +153,6 @@ async fn next_node_handles_a_deep_accepted_child_fast_path() {
     .await;
     assert_eq!(value["result"]["value"].as_f64(), Some(5000.0));
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

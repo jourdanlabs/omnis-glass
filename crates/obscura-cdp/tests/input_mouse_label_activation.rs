@@ -125,6 +125,7 @@ async fn state(ctx: &mut CdpContext, id: u64, sid: &str) -> Value {
 
 #[tokio::test(flavor = "current_thread")]
 async fn mouse_click_on_a_label_activates_its_control() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     click_element(&mut ctx, 10, &sid, "#explicit").await;
     click_element(&mut ctx, 20, &sid, "#implicit").await;
@@ -141,6 +142,7 @@ async fn mouse_click_on_a_label_activates_its_control() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn mouse_click_deep_inside_a_label_activates_its_control() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     click_element(&mut ctx, 10, &sid, "#deep-text").await;
     let state = state(&mut ctx, 20, &sid).await;
@@ -149,6 +151,7 @@ async fn mouse_click_deep_inside_a_label_activates_its_control() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn mouse_click_on_a_label_for_a_disabled_control_does_nothing() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     click_element(&mut ctx, 10, &sid, "#off").await;
     click_element(&mut ctx, 20, &sid, "#boxd").await;
@@ -156,3 +159,6 @@ async fn mouse_click_on_a_label_for_a_disabled_control_does_nothing() {
     assert_eq!(state["d"], false, "disabled control must not toggle: {state}");
     assert_eq!(state["events"], "", "disabled control must dispatch nothing: {state}");
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

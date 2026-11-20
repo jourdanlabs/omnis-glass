@@ -45,6 +45,7 @@ fn spawn_echo_server() -> String {
 
 #[tokio::test]
 async fn page_intercepts_and_observes_js_fetch() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_echo_server();
 
@@ -113,6 +114,7 @@ async fn page_intercepts_and_observes_js_fetch() {
 /// context, and must not survive page A being dropped.
 #[tokio::test]
 async fn callbacks_do_not_bleed_across_pages() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_echo_server();
 
@@ -157,6 +159,7 @@ async fn callbacks_do_not_bleed_across_pages() {
 
 #[tokio::test]
 async fn page_rewrites_request_url_via_interception() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_echo_server();
     let modified = format!("{}/modified", base);
@@ -218,6 +221,7 @@ async fn page_rewrites_request_url_via_interception() {
 // vecs were append-only and a callback fired for the client's whole lifetime.
 #[tokio::test]
 async fn on_response_callback_can_be_detached() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_echo_server();
 
@@ -258,3 +262,6 @@ async fn on_response_callback_can_be_detached() {
         "detached on_response callback must not fire after off_response"
     );
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

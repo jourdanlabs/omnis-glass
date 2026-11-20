@@ -23,6 +23,7 @@ stealth = ["obscura-browser/stealth", "obscura-net/stealth", "obscura-mcp/stealt
 render = ["obscura-browser/render", "obscura-cdp/render", "obscura-mcp/render"]
 
 [dependencies]
+glass-build-info = { path = "../glass-build-info" }
 obscura-browser = { workspace = true }
 obscura-mcp = { workspace = true }
 obscura-cdp = { workspace = true }

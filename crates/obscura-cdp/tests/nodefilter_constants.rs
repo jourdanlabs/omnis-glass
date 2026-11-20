@@ -70,6 +70,7 @@ async fn setup() -> (CdpContext, String) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn node_filter_exposes_the_standard_constants() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let v = eval(
         &mut ctx,
@@ -98,6 +99,7 @@ async fn node_filter_exposes_the_standard_constants() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn tree_walker_filter_using_filter_accept_constant_works() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     // The canonical MDN idiom: acceptNode returns NodeFilter.FILTER_ACCEPT.
     // Only the first accepted child is checked, so this does not depend on the
@@ -123,3 +125,6 @@ async fn tree_walker_filter_using_filter_accept_constant_works() {
         "a filter returning NodeFilter.FILTER_ACCEPT must accept the node, not reject it"
     );
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

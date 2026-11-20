@@ -92,6 +92,7 @@ async fn raw_handshake_status(ws_port: u16) -> String {
 
 #[test]
 fn max_connections_refuses_then_recovers() {
+    let _fixture_state = fixture_support::local_fixture();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -160,3 +161,6 @@ fn max_connections_refuses_then_recovers() {
         );
     });
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

@@ -65,7 +65,7 @@ Obscura is a headless browser engine written in Rust, built for web scraping and
 
 We are working on **Obscura Cloud** the hosted version, with managed infrastructure, residential proxies, and dedicated support. For people who want the engine without operating it themselves.
 
-The open-source engine stays Apache-2.0, fully featured. No feature gating, ever.
+The open-source engine stays Apache-2.0, fully featured. No feature gating, ever. *(This is upstream Obscura's statement about its own engine. OMNIS GLASS is licensed differently: see License below.)*
 
 **[Get on the waitlist →](https://tally.so/r/gDWzdD)**
 <br>
@@ -582,6 +582,6 @@ streaming `Page.startScreencast` protocol.
 
 ## License
 
-Apache 2.0
+OMNIS GLASS version 1.1 and later: Business Source License 1.1 (see `LICENSE`), converting to Apache 2.0 four years after each version is published. Version 1.0 stays under Apache 2.0. Upstream Obscura code stays under Apache 2.0 (`LICENSE-APACHE-2.0`, `NOTICE`).
 
 ---

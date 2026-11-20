@@ -101,6 +101,7 @@ fn assert_frame_contract(frame: &Value) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn every_page_frame_path_uses_the_current_cdp_contract() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let mut ctx = CdpContext::new();
 
@@ -227,3 +228,6 @@ async fn every_page_frame_path_uses_the_current_cdp_contract() {
     assert_eq!(route_frame["loaderId"], loader_id);
     assert!(route_frame["url"].as_str().unwrap().ends_with("/next"));
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

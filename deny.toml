@@ -39,6 +39,25 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# OMNIS GLASS's own workspace crates are BUSL-1.1 (see LICENSE). No dependency may be.
+exceptions = [
+    { allow = ["BUSL-1.1"], crate = "glass-build-info" },
+    { allow = ["BUSL-1.1"], crate = "glass-capture" },
+    { allow = ["BUSL-1.1"], crate = "glass-govern" },
+    { allow = ["BUSL-1.1"], crate = "glass-ledger" },
+    { allow = ["BUSL-1.1"], crate = "glass-pane-bridge" },
+    { allow = ["BUSL-1.1"], crate = "glass-pane-ui" },
+    { allow = ["BUSL-1.1"], crate = "glass-pane" },
+    { allow = ["BUSL-1.1"], crate = "glass-terminus" },
+    { allow = ["BUSL-1.1"], crate = "obscura-browser" },
+    { allow = ["BUSL-1.1"], crate = "obscura-cdp" },
+    { allow = ["BUSL-1.1"], crate = "obscura-cli" },
+    { allow = ["BUSL-1.1"], crate = "obscura-js" },
+    { allow = ["BUSL-1.1"], crate = "obscura-mcp" },
+    { allow = ["BUSL-1.1"], crate = "obscura-net" },
+    { allow = ["BUSL-1.1"], crate = "obscura-render" },
+]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

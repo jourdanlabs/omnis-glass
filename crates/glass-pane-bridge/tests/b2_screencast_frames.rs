@@ -43,17 +43,21 @@ fn glass_env(dir: &std::path::Path, token: &str) {
 
 #[test]
 fn b2_screencast_frames_after_navigate() {
+    run_b2_collect_frames(5, Duration::from_secs(15));
+}
+
+fn run_b2_collect_frames(min_frames: usize, collect_budget: Duration) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, async {
-        b2_screencast_frames_after_navigate_async().await;
+        b2_collect_screencast_frames_async(min_frames, collect_budget).await;
     });
 }
 
-async fn b2_screencast_frames_after_navigate_async() {
+async fn b2_collect_screencast_frames_async(min_frames: usize, collect_budget: Duration) {
     let dir = tempfile::tempdir().unwrap();
     let token = "b2-screencast-test-token";
     glass_env(dir.path(), token);
@@ -143,8 +147,10 @@ async fn b2_screencast_frames_after_navigate_async() {
 
     let frames = Arc::new(AtomicUsize::new(0));
     let mut next_ack_id = 10u64;
-    let frame_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    while frames.load(Ordering::Relaxed) < 5 && tokio::time::Instant::now() < frame_deadline {
+    let frame_deadline = tokio::time::Instant::now() + collect_budget;
+    while frames.load(Ordering::Relaxed) < min_frames
+        && tokio::time::Instant::now() < frame_deadline
+    {
         if let Ok(Some(Ok(Message::Text(t)))) =
             tokio::time::timeout(Duration::from_millis(500), ws.next()).await
         {
@@ -177,8 +183,8 @@ async fn b2_screencast_frames_after_navigate_async() {
         }
     }
     assert!(
-        frames.load(Ordering::Relaxed) >= 5,
-        "expected ≥5 Page.screencastFrame events, got {}",
+        frames.load(Ordering::Relaxed) >= min_frames,
+        "expected ≥{min_frames} Page.screencastFrame events, got {}",
         frames.load(Ordering::Relaxed)
     );
 }
@@ -186,5 +192,6 @@ async fn b2_screencast_frames_after_navigate_async() {
 #[test]
 #[ignore = "can-fail mirror — must fail when run with --ignored"]
 fn b2_WEAKEN_would_accept_zero_frames() {
-    assert!(0 >= 5, "WEAKEN: weakened test would accept zero frames");
+    // Same live CDP/screencast path; impossible collection window → must not satisfy ≥5.
+    run_b2_collect_frames(5, Duration::from_millis(1));
 }

@@ -86,6 +86,7 @@ async fn setup() -> (CdpContext, String) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn iframe_document_dispatches_registered_listeners() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     // Accessing contentDocument on a src-less iframe lazily creates an
     // about:blank _IframeDocument synchronously, so this exercises the event
@@ -133,6 +134,7 @@ async fn iframe_document_dispatches_registered_listeners() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn iframe_load_reaches_onload_and_addeventlistener() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     // Both the onload property and an addEventListener('load', ...) listener
     // must run exactly once. On main, setting onload made the direct-call path
@@ -168,3 +170,6 @@ async fn iframe_load_reaches_onload_and_addeventlistener() {
         "both onload property and addEventListener('load') run exactly once, in order"
     );
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

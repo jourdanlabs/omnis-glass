@@ -185,6 +185,7 @@ async fn navigate_dynamic_order_fixture(explicitly_in_order: bool) -> (Vec<Strin
 
 #[tokio::test(flavor = "current_thread")]
 async fn dynamic_classic_fetch_concurrency_matches_force_async_state() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
 
     let (async_order, async_peak, async_elapsed_ms) =
@@ -210,6 +211,7 @@ async fn dynamic_classic_fetch_concurrency_matches_force_async_state() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn dynamic_external_scripts_execute_and_fire_load() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve().await;
     let mut ctx = CdpContext::new();
@@ -268,6 +270,7 @@ async fn dynamic_external_scripts_execute_and_fire_load() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn dynamic_data_scripts_execute_before_chained_load_handlers() {
+    let _fixture_state = fixture_support::local_fixture();
     let mut ctx = CdpContext::new();
     let page_id = ctx.create_page();
     let session_id = "session-1";
@@ -349,6 +352,7 @@ async fn dynamic_data_scripts_execute_before_chained_load_handlers() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn invalid_dynamic_data_script_fires_error_not_load() {
+    let _fixture_state = fixture_support::local_fixture();
     let mut ctx = CdpContext::new();
     let page_id = ctx.create_page();
     let session_id = "session-1";
@@ -396,3 +400,6 @@ async fn invalid_dynamic_data_script_fires_error_not_load() {
     .await;
     assert_eq!(result["result"]["value"], r#"{"error":true,"load":false}"#);
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

@@ -221,5 +221,8 @@ Contributions that add detection-evasion for abusive purposes are out of scope.
 
 ## License
 
+OMNIS GLASS is licensed under the [Business Source License 1.1](LICENSE).
 By contributing, you agree that your contributions are licensed under the
-[Apache License 2.0](LICENSE), the same license as the project.
+[Apache License 2.0](LICENSE-APACHE-2.0), so that Forseti Research can ship
+them in OMNIS GLASS under its licence and under the Apache License 2.0 when
+each version converts.

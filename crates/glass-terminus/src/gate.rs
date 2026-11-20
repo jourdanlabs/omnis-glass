@@ -198,6 +198,7 @@ impl TerminusGate {
 
         let output = Command::new(node)
             .arg(&self.authorize_script)
+            .env("OMNIS_GLASS_STATE_DIR", &self.state_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -267,14 +268,10 @@ impl TerminusGate {
         verdict: &GateVerdict,
         fields: serde_json::Map<String, Value>,
     ) {
-        if let Ok(writer) = BrowserActionWriter::new(&self.state_dir) {
-            let _ = writer.write_action(
-                action.as_str(),
-                &self.lane,
-                &verdict.verdict,
-                fields,
-            );
-        }
+        if let Err(error) = BrowserActionWriter::new(&self.state_dir).and_then(|writer| {
+            writer.write_action(action.as_str(), &self.lane, &verdict.verdict, fields)
+        }) { eprintln!("browser action receipt write failed: {error}"); }
+
     }
 }
 
@@ -286,6 +283,10 @@ mod tests {
 
     #[test]
     fn disallowed_host_refused() {
+        std::env::set_var("OMNIS_GLASS_ENFORCE", "enforce");
+        std::env::set_var("OMNIS_GLASS_LANE", "browse:research");
+        std::env::remove_var("OMNIS_GLASS_LANES");
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
         let dir = tempdir().unwrap();
         std::env::set_var("OMNIS_GLASS_STATE_DIR", dir.path());
         let gate = TerminusGate::new(dir.path());

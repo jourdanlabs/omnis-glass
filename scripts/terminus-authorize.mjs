@@ -6,9 +6,6 @@
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sha256 = (s) => createHash('sha256').update(String(s)).digest('hex');
 
 const DECISION = {
@@ -62,11 +59,8 @@ function chainHead(path) {
 }
 
 function writeReceipt(fields) {
-  const ledger =
-    process.env.TERMINUS_ACTION_LEDGER ||
-    process.env.OMNIS_GLASS_STATE_DIR
-      ? join(process.env.OMNIS_GLASS_STATE_DIR, 'terminus.actions.jsonl')
-      : join(ROOT, 'receipts', 'terminus.actions.jsonl');
+  const state = process.env.OMNIS_GLASS_STATE_DIR || join(process.env.HOME || '/tmp', '.omnis-glass');
+  const ledger = process.env.TERMINUS_ACTION_LEDGER || join(state, 'terminus.actions.jsonl');
   mkdirSync(dirname(ledger), { recursive: true });
   const body = {
     receipt: 'terminus.action',
@@ -92,6 +86,10 @@ function authorizeBrowser(action) {
   const lane = action.lane || 'browse:research';
   const browserAction = action.action || 'navigate';
   const host = action.target?.host || '';
+  const isKeyEvent = browserAction === 'type' && action.key_event === true;
+  const keyReceiptFields = isKeyEvent
+    ? { payload_digest: null, chars: Array.from(action.payload?.field_value ?? '').length }
+    : {};
 
   // Lane structural checks (mirrors browser-lanes.yaml semantics)
   if (lane === 'browse:scrape') {
@@ -108,6 +106,7 @@ function authorizeBrowser(action) {
         decision: DECISION.REFUSE_LANE,
         reason: 'lane_read_only',
         refused: true,
+        ...keyReceiptFields,
       });
       return {
         verdict: 'REFUSE',
@@ -133,7 +132,8 @@ function authorizeBrowser(action) {
       action: browserAction,
       lane,
       host,
-      payload_digest: text ? sha256(text) : null,
+      payload_digest: isKeyEvent ? null : (text ? sha256(text) : null),
+      ...keyReceiptFields,
       verdict: 'REFUSE',
       decision,
       reason: scan.rule,
@@ -147,7 +147,8 @@ function authorizeBrowser(action) {
     action: browserAction,
     lane,
     host,
-    payload_digest: text ? sha256(text) : null,
+    payload_digest: isKeyEvent ? null : (text ? sha256(text) : null),
+    ...keyReceiptFields,
     verdict: 'ALLOW',
     decision: DECISION.PERMIT,
     reason: 'permit',

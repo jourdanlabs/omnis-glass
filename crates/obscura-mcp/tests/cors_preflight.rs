@@ -20,6 +20,7 @@ fn pick_free_port() -> u16 {
 
 #[tokio::test(flavor = "current_thread")]
 async fn options_preflight_lists_required_browser_headers() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
     let port = pick_free_port();
     let local = LocalSet::new();
 
@@ -91,6 +92,7 @@ async fn options_preflight_lists_required_browser_headers() {
 /// OOM-ing the process (unauthenticated DoS).
 #[tokio::test(flavor = "current_thread")]
 async fn oversized_content_length_is_rejected() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
     let port = pick_free_port();
     let local = LocalSet::new();
 
@@ -135,3 +137,6 @@ async fn oversized_content_length_is_rejected() {
         })
         .await;
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

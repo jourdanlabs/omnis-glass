@@ -134,6 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn device_metrics_override_updates_page_and_window_viewport() {
+        let _glass_isolated_state = crate::domains::emulation::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("viewport-session".to_string());
@@ -172,6 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn omitted_screen_metrics_clear_only_the_screen_override() {
+        let _glass_isolated_state = crate::domains::emulation::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("screen-session".to_string());
@@ -211,6 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn device_metrics_override_rejects_fractional_and_out_of_range_dimensions() {
+        let _glass_isolated_state = crate::domains::emulation::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("viewport-session".to_string());
@@ -231,6 +234,7 @@ mod tests {
 
     #[tokio::test]
     async fn zero_dimensions_disable_size_override() {
+        let _glass_isolated_state = crate::domains::emulation::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("zero-size-session".to_string());
@@ -260,6 +264,7 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_overrides_keep_baseline_and_clear_restores_it() {
+        let _glass_isolated_state = crate::domains::emulation::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("scale-session".to_string());
@@ -331,6 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn inactive_clear_is_a_no_op() {
+        let _glass_isolated_state = crate::domains::emulation::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("inactive-clear-session".to_string());
@@ -355,6 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn mobile_without_complete_screen_size_uses_effective_viewport() {
+        let _glass_isolated_state = crate::domains::emulation::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("mobile-screen-session".to_string());
@@ -391,6 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn validates_mobile_and_each_optional_screen_dimension() {
+        let _glass_isolated_state = crate::domains::emulation::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("validation-session".to_string());
@@ -414,6 +422,7 @@ mod tests {
 
     #[test]
     fn default_background_color_matches_blink_defaults_rounding_and_clamping() {
+        let _glass_isolated_state = crate::domains::emulation::glass_fixture_env::isolated_state();
         assert_eq!(default_background_color(&json!({})), Ok(None));
         assert_eq!(
             default_background_color(&json!({"color": {"r": 1, "g": 2, "b": 3}})),
@@ -441,6 +450,7 @@ mod tests {
 
     #[test]
     fn default_background_color_rejects_malformed_rgba() {
+        let _glass_isolated_state = crate::domains::emulation::glass_fixture_env::isolated_state();
         for params in [
             json!({"color": null}),
             json!({"color": {"g": 2, "b": 3}}),
@@ -454,3 +464,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

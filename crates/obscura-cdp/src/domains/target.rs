@@ -97,6 +97,10 @@ pub async fn handle(
             }
 
             ctx.sessions.insert(session_id.clone(), page_id.clone());
+            // A first blank target must be live before it can be observed.
+            if !ctx.pages.iter().any(|page| page.has_js()) {
+                let _ = ctx.get_session_page_mut(&Some(session_id.clone()));
+            }
 
             if let Some(page) = ctx.get_page(&page_id) {
                 ctx.pending_events.push(CdpEvent::new(
@@ -221,7 +225,13 @@ pub async fn handle(
                 json!({ "targetId": target_id }),
             ));
 
+            let was_live = ctx.get_page(target_id).is_some_and(|page| page.has_js());
             ctx.remove_page(target_id);
+            if was_live && !ctx.pages.iter().any(|page| page.has_js()) {
+                if let Some(session) = ctx.pages.last().map(|page| format!("{}-session", page.id)) {
+                    let _ = ctx.get_session_page_mut(&Some(session));
+                }
+            }
             Ok(json!({ "success": true }))
         }
         "setAutoAttach" => Ok(json!({})),
@@ -323,6 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn browser_contexts_are_real_and_do_not_clear_default_cookies() {
+        let _glass_isolated_state = crate::domains::target::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         ctx.default_context.cookie_jar.set_cookie(
             "sid=default",
@@ -350,6 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn disposing_context_removes_only_its_pages() {
+        let _glass_isolated_state = crate::domains::target::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let context_id = ctx.create_browser_context();
         let isolated_page = ctx.create_page_in_context(Some(&context_id)).unwrap();
@@ -371,6 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_to_browser_target_returns_session_id() {
+        let _glass_isolated_state = crate::domains::target::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let result = handle("attachToBrowserTarget", &json!({}), &mut ctx, &None)
             .await
@@ -396,6 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_page_attachment_is_unique_and_scoped_to_its_parent_session() {
+        let _glass_isolated_state = crate::domains::target::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let managed_session = format!("{page_id}-session");
@@ -436,6 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn detaching_explicit_session_removes_its_page_route() {
+        let _glass_isolated_state = crate::domains::target::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let parent_session = Some("browser-session".to_string());
@@ -462,6 +477,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_target_method_still_errors() {
+        let _glass_isolated_state = crate::domains::target::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let err = handle("notARealMethod", &json!({}), &mut ctx, &None)
             .await
@@ -475,6 +491,7 @@ mod tests {
     /// like chromiumoxide panic when the field is missing.
     #[tokio::test]
     async fn get_target_info_browser_target_includes_can_access_opener() {
+        let _glass_isolated_state = crate::domains::target::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         // No targetId → falls through to the browser-target branch.
         let result = handle("getTargetInfo", &json!({}), &mut ctx, &None)
@@ -490,3 +507,6 @@ mod tests {
         assert_eq!(info["canAccessOpener"], false);
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

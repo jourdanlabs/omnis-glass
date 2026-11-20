@@ -1,13 +1,17 @@
 * { box-sizing: border-box; }
-body { margin: 0; font-family: system-ui, sans-serif; background: #1a1a1a; color: #eee; }
+body { display: flex; flex-direction: column; height: 100vh; margin: 0; font-family: system-ui, sans-serif; background: #1a1a1a; color: #eee; }
 header { display: flex; gap: 8px; padding: 8px; background: #2a2a2a; align-items: center; }
 #url-bar { flex: 1; padding: 6px 10px; border: 1px solid #444; background: #111; color: #eee; }
 .badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
 .badge.mirror { background: #2563eb; }
 .badge.human { background: #d97706; }
 .badge.locked { background: #dc2626; }
-main { display: flex; height: calc(100vh - 48px); }
-#viewport { flex: 1; background: #000; object-fit: contain; max-width: 100%; }
-#rail { width: 280px; overflow-y: auto; border-left: 1px solid #333; padding: 8px; font-size: 13px; }
+main { display: flex; flex: 1; min-height: 0; }
+#viewport { flex: 0 0 auto; height: 100%; min-height: 0; width: calc(100% - 280px); min-width: 0; background: #000; object-fit: contain; max-width: 100%; }
+#rail { flex: 0 0 280px; min-width: 0; overflow-y: auto; border-left: 1px solid #333; padding: 8px; font-size: 13px; }
 #rail ul { list-style: none; padding: 0; margin: 0; }
 #rail li { padding: 6px 0; border-bottom: 1px solid #333; }
+
+#status { flex: 0 0 40px; margin: 0; padding: 8px; overflow: hidden; }
+
+#scripts-stopped { margin: 0; padding: 8px; background: #714500; color: #fff4ca; font-weight: 600; }

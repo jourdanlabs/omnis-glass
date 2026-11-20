@@ -1384,13 +1384,14 @@ impl ObscuraHttpClient {
                 _ => glass_govern::HttpGateAction::Navigate,
             },
         };
-        if let Err(reason) = glass_govern::gate_http_outbound(
-            url,
-            initial_body.as_deref(),
-            gate_kind,
-            "http",
-            self.allow_private_network,
-        ) {
+        let gate_result = if matches!(gate_kind, glass_govern::HttpGateAction::Navigate)
+            && request.resource_type == ResourceType::Document
+            && initial_method == Method::GET && initial_body.is_none() {
+            glass_govern::gate_http_document_get(url, "http", self.allow_private_network)
+        } else {
+            glass_govern::gate_http_outbound(url, initial_body.as_deref(), gate_kind, "http", self.allow_private_network)
+        };
+        if let Err(reason) = gate_result {
             return Err(ObscuraNetError::Blocked(reason));
         }
 
@@ -1733,6 +1734,7 @@ mod ssrf_tests {
 
     #[test]
     fn ipv4_private_and_special_ranges_are_forbidden() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
         for s in [
             "127.0.0.1",
             "127.5.6.7",
@@ -1750,6 +1752,7 @@ mod ssrf_tests {
 
     #[test]
     fn public_ipv4_is_allowed() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
         for s in ["1.1.1.1", "8.8.8.8", "93.184.216.34"] {
             assert!(!is_forbidden_ip(ip(s)), "{s} should be allowed");
         }
@@ -1757,6 +1760,7 @@ mod ssrf_tests {
 
     #[test]
     fn ipv6_loopback_ula_linklocal_and_mapped_are_forbidden() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
         for s in [
             "::1",                    // loopback
             "::",                     // unspecified
@@ -1772,11 +1776,14 @@ mod ssrf_tests {
 
     #[test]
     fn public_ipv6_is_allowed() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
         assert!(!is_forbidden_ip(ip("2606:4700:4700::1111"))); // cloudflare dns
     }
 
     #[test]
     fn validate_url_blocks_unspecified_and_allows_public() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
         // 0.0.0.0 previously slipped through validate_url's literal-host check.
         assert!(validate_url(&Url::parse("http://0.0.0.0:8080/").unwrap(), false).is_err());
         assert!(validate_url(&Url::parse("http://127.0.0.1/").unwrap(), false).is_err());
@@ -1787,6 +1794,7 @@ mod ssrf_tests {
 
     #[test]
     fn resource_profiles_use_type_specific_fetch_metadata() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
         let document = Url::parse("https://app.example/page?q=1#fragment").unwrap();
         let image = ResourceRequest::subresource(ResourceType::Image, &document);
         assert_eq!(image.mode, RequestMode::NoCors);
@@ -1830,6 +1838,7 @@ mod ssrf_tests {
 
     #[test]
     fn subresource_referrer_and_fetch_site_follow_default_browser_policy() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
         let source = Url::parse("https://user:secret@app.example/path?q=1#frag").unwrap();
         let request = ResourceRequest::subresource(ResourceType::Image, &source);
         let same_origin = Url::parse("https://app.example/image.png").unwrap();
@@ -1895,7 +1904,33 @@ mod ssrf_tests {
     }
 
     #[tokio::test]
+    async fn approved_document_get_does_not_waive_other_requests() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
+        let (target, mut requests) = http_fixture(vec![ok_response("", "ok"), ok_response("", "ok"), ok_response("", "ok")]).await;
+        let client = ObscuraHttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        for method in [reqwest::Method::GET, reqwest::Method::POST] {
+            let context = glass_govern::CommandContext::agent().with_private_network(true);
+            glass_govern::with_command_context(context, async {
+                assert!(glass_govern::gate_cdp_command("Page.navigate", &serde_json::json!({"url":target.as_str()}), &None).is_none());
+                client.fetch_with_method(method, &target, None, None).await.unwrap();
+            }).await;
+        }
+        let context = glass_govern::CommandContext::agent().with_private_network(true);
+        glass_govern::with_command_context(context, async {
+            assert!(glass_govern::gate_cdp_command("Page.navigate", &serde_json::json!({"url":target.as_str()}), &None).is_none());
+            client.fetch_resource_with_callbacks(&target, ResourceRequest::subresource(ResourceType::Image, &target), None).await.unwrap();
+        }).await;
+        assert!(requests.recv().await.unwrap().starts_with("GET "));
+        assert!(requests.recv().await.unwrap().starts_with("POST "));
+        assert!(requests.recv().await.unwrap().starts_with("GET "));
+        let ledger = std::path::PathBuf::from(std::env::var_os("OMNIS_GLASS_STATE_DIR").unwrap()).join("browser.actions.jsonl");
+        let records = std::fs::read_to_string(ledger).unwrap();
+        assert_eq!(records.lines().count(), 5, "only a document GET may reuse the navigation receipt");
+    }
+
+    #[tokio::test]
     async fn cross_origin_font_sends_origin_and_omits_cross_origin_cookies() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (target, mut received) = http_fixture(vec![ok_response(
             "Access-Control-Allow-Origin: *\r\nSet-Cookie: rejected=1; Path=/\r\n",
             "font",
@@ -1925,6 +1960,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn cross_origin_module_uses_cors_script_profile_without_credentials() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (target, mut received) = http_fixture(vec![ok_response(
             "Access-Control-Allow-Origin: *\r\nSet-Cookie: rejected=1; Path=/\r\n",
             "export default 1;",
@@ -1956,6 +1992,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn credentialed_cors_rejects_wildcard_and_accepts_exact_origin() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let initiator = Url::parse("http://127.0.0.1:1/page").unwrap();
         let wildcard = ok_response(
             "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Credentials: true\r\n",
@@ -1994,6 +2031,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn same_origin_font_needs_no_cors_header_and_sends_cookies() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (target, mut received) = http_fixture(vec![ok_response("", "same")]).await;
         let mut initiator = target.clone();
         initiator.set_path("/page");
@@ -2015,6 +2053,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn accept_language_override_reaches_the_wire() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (target, mut received) = http_fixture(vec![ok_response("", "ok")]).await;
         let client = ObscuraHttpClient::with_full_options(
             Arc::new(CookieJar::new()),
@@ -2036,6 +2075,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn response_limits_reject_content_length_and_streamed_overflow() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let advertised = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n";
         let chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n4\r\nefgh\r\n0\r\n\r\n";
         let (target, _) = http_fixture(vec![advertised.to_string(), chunked.to_string()]).await;
@@ -2130,6 +2170,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn cancellation_returns_active_requests_to_zero() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (target, started) = hanging_fixture().await;
         let client = Arc::new(ObscuraHttpClient::with_full_options(
             Arc::new(CookieJar::new()),
@@ -2149,6 +2190,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn cancelled_shared_subresource_leader_wakes_follower_and_clears_slot() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (target, started, network_requests) = cancelled_shared_fetch_fixture().await;
         let initiator = target.join("/page.html").unwrap();
         let request = ResourceRequest::subresource(ResourceType::Script, &initiator);
@@ -2224,6 +2266,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn transport_timeout_returns_active_requests_to_zero() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (target, started) = hanging_fixture().await;
         let mut client = ObscuraHttpClient::with_full_options(
             Arc::new(CookieJar::new()),
@@ -2239,6 +2282,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn callbacks_fire_once_across_redirects() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let redirect = "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let (target, _) = http_fixture(vec![redirect.to_string(), ok_response("", "done")]).await;
         let client = ObscuraHttpClient::with_full_options(
@@ -2302,6 +2346,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn cacheable_identical_subresources_share_one_in_flight_request() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (url, network_requests) = cacheable_resource_fixture(
             200,
             "Cache-Control: public, max-age=3600\r\nVary: Accept-Language\r\n",
@@ -2352,6 +2397,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn cacheable_identical_module_scripts_share_one_in_flight_request() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (url, network_requests) = cacheable_resource_fixture(
             200,
             "Cache-Control: public, max-age=3600\r\n",
@@ -2388,6 +2434,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn distinct_subresource_urls_do_not_coalesce() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (url, network_requests) =
             cacheable_resource_fixture(200, "Cache-Control: public, max-age=3600\r\n").await;
         let initiator = url.join("/page.html").unwrap();
@@ -2420,6 +2467,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn no_store_vary_star_and_error_responses_are_not_reused() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         for (status, headers) in [
             (200, "Cache-Control: no-store\r\n"),
             (200, "Cache-Control: public, max-age=3600\r\nVary: *\r\n"),
@@ -2448,6 +2496,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn authorization_and_cookie_bearing_requests_bypass_resource_cache() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         for header in [
             ("Authorization", "Bearer secret"),
             ("Cookie", "session=secret"),
@@ -2482,6 +2531,8 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn resolver_blocks_hostname_that_resolves_to_loopback() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
+        std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
         // localtest.me is a public DNS name that resolves to 127.0.0.1 — the
         // canonical DNS-rebinding test. The guard must reject it. If DNS is
         // unavailable the lookup itself errors (also Err), so the assertion
@@ -2493,6 +2544,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn resolver_does_not_ssrf_block_public_host() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
         // A public host must not be SSRF-blocked. Tolerate a no-network sandbox
         // by only failing on an actual SSRF rejection, not a lookup failure.
         let r = SsrfGuardResolver::new(false);
@@ -2568,6 +2620,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn configured_roots_trust_a_private_ca_via_ssl_cert_file() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (port, ca_pem) = https_fixture_with_private_ca().await;
         let ca_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(ca_file.path(), ca_pem).unwrap();
@@ -2583,6 +2636,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn configured_roots_trust_a_private_ca_via_ssl_cert_dir() {
+        let _glass_fixture_state = crate::client::glass_fixture_env::local_fixture();
         let (port, ca_pem) = https_fixture_with_private_ca().await;
         let ca_dir = tempfile::tempdir().unwrap();
         std::fs::write(ca_dir.path().join("private-ca.pem"), ca_pem).unwrap();
@@ -2601,6 +2655,7 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn private_ca_is_still_rejected_without_ssl_cert_file() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
         // The same fixture that the SSL_CERT_FILE test trusts must fail here. The
         // listener is reachable (same setup), so an Err can only be TLS.
         let (port, _ca_pem) = https_fixture_with_private_ca().await;
@@ -2618,6 +2673,7 @@ mod cert_env_tests {
 
     #[test]
     fn empty_ssl_cert_env_is_treated_as_unset() {
+        let _glass_isolated_state = crate::client::glass_fixture_env::isolated_state();
         // Set-but-empty must NOT request a custom store: for the stealth client
         // that would replace the webpki roots with a near-empty default-paths
         // store and break all HTTPS.
@@ -2640,3 +2696,6 @@ mod cert_env_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

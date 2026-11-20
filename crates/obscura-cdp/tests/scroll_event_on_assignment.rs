@@ -100,6 +100,7 @@ async fn probe(ctx: &mut CdpContext, sid: &str, body: &str) -> Value {
 
 #[tokio::test(flavor = "current_thread")]
 async fn assigning_scroll_top_fires_one_scroll_event() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let r = probe(&mut ctx, &sid, "el.scrollTop = 100;").await;
     assert_eq!(r["fired"], 1, "scrollTop assignment must fire exactly one scroll event");
@@ -108,6 +109,7 @@ async fn assigning_scroll_top_fires_one_scroll_event() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn assigning_scroll_left_fires_one_scroll_event() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let r = probe(&mut ctx, &sid, "el.scrollLeft = 40;").await;
     assert_eq!(r["fired"], 1, "scrollLeft assignment must fire exactly one scroll event");
@@ -118,6 +120,7 @@ async fn assigning_scroll_left_fires_one_scroll_event() {
 /// otherwise a loader that writes `scrollTop` on every frame re-enters forever.
 #[tokio::test(flavor = "current_thread")]
 async fn reassigning_the_same_offset_is_silent() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let r = probe(&mut ctx, &sid, "el.scrollTop = 100; el.scrollTop = 100;").await;
     assert_eq!(r["fired"], 1, "only the offset change fires; the repeat must not");
@@ -128,6 +131,7 @@ async fn reassigning_the_same_offset_is_silent() {
 /// inside `scrollTo`/`scrollBy` so the operation stays a single event.
 #[tokio::test(flavor = "current_thread")]
 async fn scroll_to_coalesces_both_axes_into_one_event() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let r = probe(&mut ctx, &sid, "el.scrollTo(30, 60);").await;
     assert_eq!(r["fired"], 1, "scrollTo must fire one event, not one per axis");
@@ -139,6 +143,7 @@ async fn scroll_to_coalesces_both_axes_into_one_event() {
 /// when the feed is scrolled. Before the fix this counted 0 and feeds froze.
 #[tokio::test(flavor = "current_thread")]
 async fn scroll_driven_lazy_loader_advances() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let v = eval(
         &mut ctx,
@@ -166,3 +171,6 @@ async fn scroll_driven_lazy_loader_advances() {
     assert_eq!(r["batches"], 2, "each forward scroll must reach the loader");
     assert_eq!(r["rows"], 12, "2 starting rows + 2 batches of 5");
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

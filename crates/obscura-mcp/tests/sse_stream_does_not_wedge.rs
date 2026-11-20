@@ -24,6 +24,7 @@ fn pick_free_port() -> u16 {
 
 #[tokio::test(flavor = "current_thread")]
 async fn open_sse_stream_does_not_block_other_requests() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
     let port = pick_free_port();
     let local = LocalSet::new();
 
@@ -95,3 +96,6 @@ async fn open_sse_stream_does_not_block_other_requests() {
         })
         .await;
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

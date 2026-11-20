@@ -61,6 +61,7 @@ fn requested_path(results: &serde_json::Value, key: &str) -> String {
 
 #[tokio::test(flavor = "current_thread")]
 async fn fetch_and_xhr_resolve_relative_urls_that_contain_double_slashes() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server();
 
@@ -150,3 +151,6 @@ async fn fetch_and_xhr_resolve_relative_urls_that_contain_double_slashes() {
         "absolute fetch URL was altered"
     );
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

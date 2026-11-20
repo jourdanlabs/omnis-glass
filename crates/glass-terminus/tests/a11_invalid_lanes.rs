@@ -4,6 +4,9 @@ use glass_terminus::{BrowserAction, LaneRegistry, OutboundEnvelope, TerminusGate
 
 #[test]
 fn a11_invalid_lanes_refuse_all() {
+    std::env::set_var("OMNIS_GLASS_ENFORCE", "enforce");
+    std::env::set_var("OMNIS_GLASS_LANE", "browse:research");
+    std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
     let bad = "policy_version: v1\ncoverage_class: x\nlanes:\n  browse:research:\n    sensitive: not_a_bool\n";
     let policy = LaneRegistry::load_yaml(bad);
     assert!(!policy.valid, "invalid yaml must set valid=false");

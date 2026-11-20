@@ -37,7 +37,12 @@ impl ScreencastFrameWriter {
             .create(true)
             .append(true)
             .open(&self.path)?;
-        writeln!(file, "{line}")?;
+        glass_ledger::lock_ledger_file(&file, &self.path)?;
+        let line = format!("{line}\n");
+        if file.write(line.as_bytes())? != line.len() {
+            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "short record write"));
+        }
+        file.flush()?;
         Ok(())
     }
 }

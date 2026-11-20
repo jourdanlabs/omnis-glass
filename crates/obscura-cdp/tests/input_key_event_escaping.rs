@@ -56,6 +56,7 @@ async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session
 
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_key_event_escapes_backslash_in_key_and_code() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve_page().await;
     let mut ctx = CdpContext::new();
@@ -116,6 +117,7 @@ async fn dispatch_key_event_escapes_backslash_in_key_and_code() {
 // textarea this way loses it with no error reported anywhere.
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_key_event_char_carries_a_newline_into_a_textarea() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve_page().await;
     let mut ctx = CdpContext::new();
@@ -164,3 +166,6 @@ async fn dispatch_key_event_char_carries_a_newline_into_a_textarea() {
         "a newline sent as a char must reach the field, not be dropped by a malformed snippet"
     );
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

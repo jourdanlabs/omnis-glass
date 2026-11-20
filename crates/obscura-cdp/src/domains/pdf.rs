@@ -289,6 +289,7 @@ mod tests {
 
     #[test]
     fn parser_accepts_standard_client_defaults_and_rejects_unrepresented_features() {
+        let _glass_isolated_state = crate::domains::pdf::glass_fixture_env::isolated_state();
         let standard = parse_options(&json!({
             "transferMode": "ReturnAsStream",
             "displayHeaderFooter": false,
@@ -382,6 +383,7 @@ mod tests {
 
     #[test]
     fn base64_size_preflight_is_exact_and_overflow_safe() {
+        let _glass_isolated_state = crate::domains::pdf::glass_fixture_env::isolated_state();
         assert_eq!(base64_encoded_len(0), Some(0));
         assert_eq!(base64_encoded_len(1), Some(4));
         assert_eq!(base64_encoded_len(2), Some(4));
@@ -395,6 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn print_to_pdf_returns_paginated_pdf_with_requested_media_box() {
+        let _glass_isolated_state = crate::domains::pdf::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = format!("{page_id}-session");
@@ -533,3 +536,6 @@ mod tests {
         assert_eq!(ranged_text.matches("/Subtype /Image").count(), 1);
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

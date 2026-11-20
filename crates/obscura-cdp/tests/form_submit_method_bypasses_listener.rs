@@ -70,6 +70,7 @@ async fn navigate(ctx: &mut CdpContext, url: &str, session_id: &str) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn submit_method_navigates_despite_prevent_default_listener() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve_form().await;
     let mut ctx = CdpContext::new();
@@ -101,6 +102,7 @@ async fn submit_method_navigates_despite_prevent_default_listener() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn request_submit_is_vetoed_by_prevent_default_listener() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve_form().await;
     let mut ctx = CdpContext::new();
@@ -155,6 +157,7 @@ async fn request_submit_is_vetoed_by_prevent_default_listener() {
 // CDP automation surface (Puppeteer/Playwright elementHandle.click()).
 #[tokio::test(flavor = "current_thread")]
 async fn cdp_click_submit_button_is_vetoed_by_prevent_default_listener() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve_form().await;
     let mut ctx = CdpContext::new();
@@ -199,6 +202,7 @@ async fn cdp_click_submit_button_is_vetoed_by_prevent_default_listener() {
 // own submit event so the valid-submitter case cannot navigate away.
 #[tokio::test(flavor = "current_thread")]
 async fn request_submit_validates_its_submitter_argument() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve_form().await;
     let mut ctx = CdpContext::new();
@@ -259,3 +263,6 @@ async fn request_submit_validates_its_submitter_argument() {
     assert_eq!(val["noArg"], "no-throw", "requestSubmit() with no submitter is valid");
     assert_eq!(val["nullArg"], "no-throw", "requestSubmit(null) means submit from the form itself");
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

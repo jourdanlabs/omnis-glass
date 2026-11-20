@@ -82,6 +82,7 @@ fn obscura(args: &[&str]) -> Output {
 
 #[test]
 fn obey_robots_is_global_and_blocks_fetch_before_target_request() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = RobotsServer::spawn();
     let url = server.url("/private/page");
     let output = obscura(&[
@@ -105,6 +106,7 @@ fn obey_robots_is_global_and_blocks_fetch_before_target_request() {
 
 #[test]
 fn obey_robots_reaches_scrape_worker_and_blocks_target_request() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = RobotsServer::spawn();
     let url = server.url("/private/page");
     let output = obscura(&[
@@ -125,6 +127,7 @@ fn obey_robots_reaches_scrape_worker_and_blocks_target_request() {
 
 #[test]
 fn fetch_without_obey_robots_keeps_existing_navigation_behavior() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = RobotsServer::spawn();
     let url = server.url("/private/page");
     let output = obscura(&[
@@ -146,6 +149,7 @@ fn fetch_without_obey_robots_keeps_existing_navigation_behavior() {
 
 #[test]
 fn obey_robots_fetches_an_allowed_target_after_loading_policy() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = RobotsServer::spawn();
     let url = server.url("/public/page");
     let output = obscura(&[
@@ -165,3 +169,6 @@ fn obey_robots_fetches_an_allowed_target_after_loading_policy() {
     );
     assert_eq!(server.paths(), vec!["/robots.txt", "/public/page"]);
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

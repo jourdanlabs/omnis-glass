@@ -515,6 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn evaluate_rejects_unknown_context_id() {
+        let _glass_isolated_state = crate::domains::runtime::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let err = handle(
             "evaluate",
@@ -533,6 +534,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_function_on_rejects_unknown_execution_context_id() {
+        let _glass_isolated_state = crate::domains::runtime::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let err = handle(
             "callFunctionOn",
@@ -553,6 +555,7 @@ mod tests {
 
     #[tokio::test]
     async fn evaluate_accepts_default_context_id_one() {
+        let _glass_isolated_state = crate::domains::runtime::glass_fixture_env::isolated_state();
         // Runtime.enable advertises contextId=1 — that must be accepted as
         // valid input to evaluate, regardless of whether a page is attached.
         // (Without a page we get an Err("No page") AFTER the contextId check,
@@ -576,6 +579,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn evaluate_await_promise_reports_the_requested_timeout() {
+        let _glass_isolated_state = crate::domains::runtime::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = "await-timeout-session".to_string();
@@ -602,6 +606,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_isolated_world_registers_id_for_evaluate() {
+        let _glass_isolated_state = crate::domains::runtime::glass_fixture_env::isolated_state();
         // Round-trip: Page.createIsolatedWorld returns contextId N, and a
         // subsequent Runtime.evaluate targeting that contextId must NOT be
         // rejected.
@@ -633,6 +638,7 @@ mod tests {
     /// puppeteer connect flow died.
     #[tokio::test]
     async fn enable_succeeds_when_no_session_attached() {
+        let _glass_isolated_state = crate::domains::runtime::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let result = handle("enable", &json!({}), &mut ctx, &None)
             .await
@@ -648,6 +654,7 @@ mod tests {
     /// never executes.
     #[tokio::test(flavor = "current_thread")]
     async fn remove_binding_rejects_injection_in_name() {
+        let _glass_isolated_state = crate::domains::runtime::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session = Some(format!("{page_id}-session"));
@@ -691,3 +698,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

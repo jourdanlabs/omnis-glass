@@ -97,6 +97,14 @@ enum Command {
         #[arg(long)]
         storage_dir: Option<std::path::PathBuf>,
 
+        /// Enable the pane observer using an in-memory capability token.
+        #[arg(long)]
+        pane_observer: bool,
+
+        /// Forbid taking human control through the pane.
+        #[arg(long)]
+        pane_mirror_only: bool,
+
         /// Suppress all logs (same as on `fetch`). Useful when scraping pages
         /// that flood the console with per-page script warnings (issue #264).
         #[arg(long)]
@@ -329,6 +337,12 @@ fn effective_v8_flags(user: Option<&str>) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--version"))
+        && std::env::current_exe().ok().and_then(|p| p.file_stem().map(|s| s == "omnis-glass")).unwrap_or(false)
+    {
+        println!("{}", glass_build_info::version_line("omnis-glass"));
+        return Ok(());
+    }
     let args = Args::parse();
 
     // Pin the process timezone before V8/ICU reads it. V8 sources the zone for
@@ -393,6 +407,8 @@ async fn main() -> anyhow::Result<()> {
             max_connections,
             allow_file_access,
             storage_dir,
+            pane_observer,
+            pane_mirror_only,
             quiet: _,
         }) => {
             // Fall back to OBSCURA_PROXY so a proxy can be supplied without
@@ -422,11 +438,17 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Stealth mode enabled (tracker blocking)");
             }
 
+            let observer_token = std::env::var("OMNIS_GLASS_PANE_OBSERVER_TOKEN").ok()
+                .filter(|token| !token.is_empty())
+                .or_else(|| pane_observer.then(obscura_cdp::cdp_auth::generate_cdp_token));
+            if workers > 1 && (observer_token.is_some() || pane_mirror_only) {
+                anyhow::bail!("pane observer requires a single serve worker");
+            }
             if workers > 1 {
                 tracing::info!("{} worker processes", workers);
                 run_multi_worker_serve(port, host, workers, proxy, stealth, user_agent).await?;
             } else {
-                obscura_cdp::start_with_serve_options_and_limit(
+                obscura_cdp::start_with_cli_pane_observer_options(
                     port,
                     &host,
                     proxy,
@@ -436,6 +458,8 @@ async fn main() -> anyhow::Result<()> {
                     storage_dir,
                     args.allow_private_network,
                     max_connections,
+                    obscura_cdp::PaneObserverOptions { token: observer_token, mirror_only: pane_mirror_only },
+                    pane_observer,
                 )
                 .await?;
             }
@@ -614,6 +638,7 @@ fn run_receipts(action: ReceiptsAction) -> anyhow::Result<()> {
                 "first_break_index": result.first_break_index,
                 "reason": result.reason,
             }))?);
+            report_legacy_capture_count(&dir)?;
             if !result.ok {
                 std::process::exit(1);
             }
@@ -627,9 +652,40 @@ fn run_receipts(action: ReceiptsAction) -> anyhow::Result<()> {
                 result.count,
                 if result.ok { "valid" } else { "BROKEN" }
             );
+            report_legacy_capture_count(&dir)?;
         }
     }
     Ok(())
+}
+
+fn report_legacy_capture_count(dir: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::BufReader;
+    let file = match std::fs::File::open(dir.join("web.captures.jsonl")) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("Legacy TLS placeholder capture receipts: 0");
+            println!("Skipped invalid capture lines: 0");
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let (count, skipped) = count_legacy_captures(BufReader::new(file))?;
+    println!("Legacy TLS placeholder capture receipts: {count}");
+    println!("Skipped invalid capture lines: {skipped}");
+    Ok(())
+}
+
+fn count_legacy_captures(mut reader: impl std::io::BufRead) -> std::io::Result<(usize, usize)> {
+    let mut count = 0;
+    let mut skipped = 0;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 { break; }
+        let value: serde_json::Value = match serde_json::from_slice(&line) { Ok(value) => value, Err(_) => { skipped += 1; continue; } };
+        if value.get("tls_cert_sha256").and_then(|v| v.as_str()) == Some("pending-v1") { count += 1; }
+    }
+    Ok((count, skipped))
 }
 
 async fn run_multi_worker_serve(
@@ -2098,6 +2154,13 @@ mod tests {
     use clap::Parser;
     use obscura_dom::parse_html;
 
+    #[test]
+    fn damaged_capture_lines_are_counted_and_skipped() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
+        let input = b"{\"tls_cert_sha256\":\"pending-v1\"}\n\nnot-json\n\xff\n{}\n";
+        assert_eq!(super::count_legacy_captures(&input[..]).unwrap(), (1, 3));
+    }
+
     // Issue #117 — `--dump original` short-circuits the browser stack and
     // streams the raw response body verbatim, including for binary payloads.
     //
@@ -2110,6 +2173,7 @@ mod tests {
     //      trailing newline that `println!` would add.
     #[test]
     fn parsed_fetch_dump_original_is_accepted_by_clap() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from([
             "obscura",
             "fetch",
@@ -2130,6 +2194,7 @@ mod tests {
     // --concurrency N` with no positional URL.
     #[test]
     fn parsed_fetch_file_and_concurrency() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from([
             "obscura",
             "fetch",
@@ -2160,6 +2225,7 @@ mod tests {
 
     #[test]
     fn concurrency_rejects_zero() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         // NonZeroUsize means --concurrency 0 is a parse error, not a silent hang
         // on a zero-permit semaphore.
         let err =
@@ -2169,6 +2235,7 @@ mod tests {
 
     #[test]
     fn read_urls_skips_blanks_and_comments() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let dir = std::env::temp_dir();
         let path = dir.join(format!("obscura_urls_{}.txt", std::process::id()));
         std::fs::write(
@@ -2190,6 +2257,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_original_bytes_returns_file_contents_verbatim() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
         // A real binary payload: a 1×1 transparent PNG (89 50 4E 47 …) —
         // exactly the kind of resource #117 wants to stream without HTML/
         // JS rendering.
@@ -2229,6 +2297,7 @@ mod tests {
     // (issue #482).
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_original_bytes_file_url_ignores_stealth_flag() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
         const PNG_BYTES: &[u8] = &[
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
             0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
@@ -2270,6 +2339,7 @@ mod tests {
     #[cfg(feature = "stealth")]
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_original_stealth_refuses_disallowed_host() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let dir = std::env::temp_dir().join(format!(
             "omnis-glass-a13-stealth-{}",
             std::process::id()
@@ -2287,6 +2357,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn write_or_print_bytes_writes_without_trailing_newline() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         // Regression guard for #117: stdout must receive raw bytes. The file
         // path used here exercises the file-output branch — println!-style
         // output (used by write_or_print) would append a 0x0A byte and
@@ -2313,6 +2384,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn write_or_print_writes_output_file_with_tokio_fs() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let path = std::env::temp_dir().join(format!(
             "obscura-fetch-output-test-{}.txt",
             std::process::id()
@@ -2333,26 +2405,31 @@ mod tests {
 
     #[test]
     fn default_filter_is_warn() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         assert_eq!(select_log_filter(false, false), "warn");
     }
 
     #[test]
     fn verbose_filter_is_debug() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         assert_eq!(select_log_filter(true, false), "debug");
     }
 
     #[test]
     fn quiet_filter_is_off() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         assert_eq!(select_log_filter(false, true), "off");
     }
 
     #[test]
     fn verbose_wins_over_quiet() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         assert_eq!(select_log_filter(true, true), "debug");
     }
 
     #[test]
     fn parsed_fetch_with_quiet_flag_is_detected() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from(["obscura", "fetch", "--quiet", "https://example.com"])
             .expect("clap should accept --quiet on fetch");
         assert!(is_quiet_command(&args.command));
@@ -2360,6 +2437,7 @@ mod tests {
 
     #[test]
     fn parsed_fetch_without_quiet_is_not_detected() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from(["obscura", "fetch", "https://example.com"])
             .expect("clap should accept fetch without --quiet");
         assert!(!is_quiet_command(&args.command));
@@ -2367,17 +2445,20 @@ mod tests {
 
     #[test]
     fn parsed_serve_command_is_not_quiet() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from(["obscura", "serve"]).expect("clap should accept serve");
         assert!(!is_quiet_command(&args.command));
     }
 
     #[test]
     fn no_subcommand_is_not_quiet() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         assert!(!is_quiet_command(&None));
     }
 
     #[test]
     fn parsed_v8_flags_global_arg() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from([
             "obscura",
             "--v8-flags",
@@ -2394,6 +2475,7 @@ mod tests {
 
     #[test]
     fn v8_flags_default_is_none() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from(["obscura", "fetch", "https://example.com"])
             .expect("clap should accept fetch without --v8-flags");
         assert!(args.v8_flags.is_none());
@@ -2401,6 +2483,7 @@ mod tests {
 
     #[test]
     fn parsed_v8_flags_with_serve_subcommand() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from([
             "obscura",
             "--v8-flags",
@@ -2415,6 +2498,7 @@ mod tests {
 
     #[test]
     fn parsed_v8_flags_with_scrape_subcommand() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from([
             "obscura",
             "--v8-flags",
@@ -2429,6 +2513,7 @@ mod tests {
 
     #[test]
     fn parsed_v8_flags_empty_string_is_accepted() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args =
             Args::try_parse_from(["obscura", "--v8-flags", "", "fetch", "https://example.com"])
                 .expect("clap should accept empty --v8-flags value");
@@ -2437,11 +2522,13 @@ mod tests {
 
     #[test]
     fn normalize_v8_flags_returns_none_when_unset() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         assert_eq!(normalize_v8_flags(None), None);
     }
 
     #[test]
     fn normalize_v8_flags_returns_none_for_empty_or_whitespace() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         assert_eq!(normalize_v8_flags(Some("")), None);
         assert_eq!(normalize_v8_flags(Some("   ")), None);
         assert_eq!(normalize_v8_flags(Some("\t\n")), None);
@@ -2449,6 +2536,7 @@ mod tests {
 
     #[test]
     fn normalize_v8_flags_trims_surrounding_whitespace() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         assert_eq!(
             normalize_v8_flags(Some("  --max-old-space-size=4096  ")).as_deref(),
             Some("--max-old-space-size=4096"),
@@ -2457,12 +2545,14 @@ mod tests {
 
     #[test]
     fn normalize_v8_flags_preserves_multi_flag_string() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let input = "--max-old-space-size=4096 --max-semi-space-size=64 --expose-gc";
         assert_eq!(normalize_v8_flags(Some(input)).as_deref(), Some(input));
     }
 
     #[test]
     fn effective_v8_flags_returns_default_when_unset() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         assert_eq!(effective_v8_flags(None), DEFAULT_V8_FLAGS);
         assert_eq!(effective_v8_flags(Some("")), DEFAULT_V8_FLAGS);
         assert_eq!(effective_v8_flags(Some("   ")), DEFAULT_V8_FLAGS);
@@ -2470,6 +2560,7 @@ mod tests {
 
     #[test]
     fn effective_v8_flags_user_overrides_default() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         // V8 parses left-to-right and later wins, so the user value must
         // come after the default in the merged string.
         let user = "--max-old-space-size=8192";
@@ -2480,6 +2571,7 @@ mod tests {
 
     #[test]
     fn effective_v8_flags_appends_user_extras() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let merged = effective_v8_flags(Some("--expose-gc"));
         assert!(merged.contains(DEFAULT_V8_FLAGS));
         assert!(merged.contains("--expose-gc"));
@@ -2487,6 +2579,7 @@ mod tests {
 
     #[test]
     fn parsed_fetch_quiet_resolves_to_off_filter() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args =
             Args::try_parse_from(["obscura", "fetch", "--quiet", "https://example.com"]).unwrap();
         let filter = select_log_filter(args.verbose, is_quiet_command(&args.command));
@@ -2495,6 +2588,7 @@ mod tests {
 
     #[test]
     fn fetch_wait_distinguishes_adaptive_default_from_fixed_delay() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let default = Args::try_parse_from(["obscura", "fetch", "https://example.com"]).unwrap();
         match default.command {
             Some(Command::Fetch { wait, .. }) => assert_eq!(wait, None),
@@ -2512,6 +2606,7 @@ mod tests {
 
     #[test]
     fn fetch_screenshot_has_a_short_alias_and_rejects_batch_mode() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from([
             "obscura",
             "fetch",
@@ -2560,6 +2655,7 @@ mod tests {
 
     #[test]
     fn fetch_timeout_sets_the_page_navigation_budget() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from([
             "obscura",
             "fetch",
@@ -2576,6 +2672,7 @@ mod tests {
 
     #[test]
     fn fetch_default_navigation_budget_remains_thirty_seconds() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from(["obscura", "fetch", "https://example.com"]).unwrap();
         assert_eq!(
             configured_fetch_timeout(args),
@@ -2585,6 +2682,7 @@ mod tests {
 
     #[test]
     fn matcher_still_uses_fetch_variant() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let cmd = Some(Command::Fetch {
             url: Some("https://x".to_string()),
             dump: Some(super::DumpFormat::Html),
@@ -2619,6 +2717,7 @@ mod tests {
 
     #[test]
     fn skips_nav_header_footer_aside() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let text = body_text(
             r#"<html><body>
                 <header>SITE HEADER</header>
@@ -2639,6 +2738,7 @@ mod tests {
 
     #[test]
     fn still_skips_script_and_style() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         // Regression guard for the original skip list.
         let text = body_text(
             r#"<html><body>
@@ -2654,6 +2754,7 @@ mod tests {
 
     #[test]
     fn command_proxy_overrides_global_proxy() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let proxy = merge_proxy(
             Some("http://global.example:8080".to_string()),
             Some("socks5://127.0.0.1:1080".to_string()),
@@ -2664,6 +2765,7 @@ mod tests {
 
     #[test]
     fn global_proxy_is_used_when_command_proxy_is_absent() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let proxy = merge_proxy(Some("http://global.example:8080".to_string()), None);
 
         assert_eq!(proxy.as_deref(), Some("http://global.example:8080"));
@@ -2671,6 +2773,7 @@ mod tests {
 
     #[test]
     fn parsed_fetch_dump_assets_is_accepted_by_clap() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let args = Args::try_parse_from([
             "obscura",
             "fetch",
@@ -2689,6 +2792,7 @@ mod tests {
 
     #[test]
     fn resolve_asset_url_keeps_absolute_unchanged() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let base = url::Url::parse("https://page.test/a/b").unwrap();
         let abs = "https://cdn.test/x.js";
         assert_eq!(resolve_asset_url(abs, Some(&base)).as_deref(), Some(abs));
@@ -2696,6 +2800,7 @@ mod tests {
 
     #[test]
     fn resolve_asset_url_joins_relative_against_base() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let base = url::Url::parse("https://page.test/a/b").unwrap();
         let rel = "/static/x.js";
         assert_eq!(
@@ -2706,6 +2811,7 @@ mod tests {
 
     #[test]
     fn resolve_asset_url_drops_empty() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let base = url::Url::parse("https://page.test/").unwrap();
         assert!(resolve_asset_url("", Some(&base)).is_none());
         assert!(resolve_asset_url("   ", Some(&base)).is_none());
@@ -2713,6 +2819,7 @@ mod tests {
 
     #[test]
     fn link_kind_from_rel_handles_common_values() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         assert_eq!(link_kind_from_rel("stylesheet"), "stylesheet");
         assert_eq!(link_kind_from_rel("icon"), "icon");
         // First token wins for multi-token rel (e.g. "shortcut icon").
@@ -2731,6 +2838,7 @@ mod tests {
 
     #[test]
     fn extract_assets_covers_every_resource_tag() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let html = r#"<html><head>
             <link rel="stylesheet" href="/site.css">
             <link rel="icon" href="/favicon.ico">
@@ -2827,6 +2935,7 @@ mod tests {
 
     #[test]
     fn extract_assets_skips_empty_attributes() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let html = r#"<html><body>
             <script src=""></script>
             <img src="   ">
@@ -2842,3 +2951,6 @@ mod tests {
         assert!(lines[0].contains("\"iframe\""));
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

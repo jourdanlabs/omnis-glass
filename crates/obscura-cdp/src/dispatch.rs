@@ -352,6 +352,8 @@ impl CdpContext {
         let target_has_js = self.pages.iter().any(|p| p.id == page_id && p.has_js());
 
         if !target_has_js {
+            #[cfg(feature = "render")]
+            crate::domains::page::invalidate_target_screencasts(self, session_id);
             for page in &mut self.pages {
                 if page.id != page_id && page.has_js() {
                     page.suspend_js();
@@ -546,6 +548,9 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
 
     #[cfg(feature = "render")]
     if result.is_ok() && domains::page::command_can_change_screencast_frame(&req.method) {
+        if matches!(req.method.as_str(), "Page.navigate" | "Page.reload" | "Page.navigateToHistoryEntry") {
+            domains::page::invalidate_target_screencasts(ctx, &req.session_id);
+        }
         if let Err(error) = domains::page::queue_screencast_frame(ctx, &req.session_id, false) {
             // Frame delivery is an asynchronous side effect in Chromium; it
             // must not rewrite an otherwise successful command response.
@@ -896,6 +901,7 @@ mod tests {
 
     #[tokio::test]
     async fn audits_enable_returns_empty_success() {
+        let _glass_isolated_state = crate::dispatch::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let resp = dispatch(&req("Audits.enable"), &mut ctx).await;
         assert!(
@@ -908,6 +914,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_domain_still_errors() {
+        let _glass_isolated_state = crate::dispatch::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let resp = dispatch(&req("DefinitelyNotADomain.enable"), &mut ctx).await;
         let err = resp.error.expect("unknown domain must surface as error");
@@ -917,6 +924,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_to_target_unwraps_inner_call() {
+        let _glass_isolated_state = crate::dispatch::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let inner = json!({
             "id": 42,
@@ -966,6 +974,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_to_target_rejects_invalid_message() {
+        let _glass_isolated_state = crate::dispatch::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let outer = CdpRequest {
             id: 5,
@@ -981,3 +990,6 @@ mod tests {
         assert_eq!(err.code, -32700);
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

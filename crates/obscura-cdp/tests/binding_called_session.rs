@@ -67,6 +67,7 @@ fn binding_calls<'a>(ctx: &'a CdpContext) -> Vec<(&'a str, &'a Value)> {
 /// matter which session that ordering happens to pick.
 #[tokio::test(flavor = "current_thread")]
 async fn every_session_that_added_the_binding_is_called() {
+    let _fixture_state = fixture_support::local_fixture();
     let mut ctx = CdpContext::new();
     let (target_id, first) = created_and_attached(&mut ctx).await;
     let second = attach_to(&mut ctx, &target_id, 902).await;
@@ -109,6 +110,7 @@ async fn every_session_that_added_the_binding_is_called() {
 /// does not see a call it has no handler for.
 #[tokio::test(flavor = "current_thread")]
 async fn a_session_that_did_not_subscribe_is_not_called() {
+    let _fixture_state = fixture_support::local_fixture();
     let mut ctx = CdpContext::new();
     let (target_id, subscriber) = created_and_attached(&mut ctx).await;
     let bystander = attach_to(&mut ctx, &target_id, 902).await;
@@ -144,6 +146,7 @@ async fn a_session_that_did_not_subscribe_is_not_called() {
 /// call cannot be delivered to a client that has stopped listening.
 #[tokio::test(flavor = "current_thread")]
 async fn a_removed_binding_is_not_called() {
+    let _fixture_state = fixture_support::local_fixture();
     let mut ctx = CdpContext::new();
     let (_, session) = created_and_attached(&mut ctx).await;
 
@@ -179,3 +182,6 @@ async fn a_removed_binding_is_not_called() {
         "a removed binding still delivered a call"
     );
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

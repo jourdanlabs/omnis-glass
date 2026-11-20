@@ -548,6 +548,70 @@ function _cssImportApplies(media) {
   return true;
 }
 
+// Split linked-sheet imports without retrying a scan of an unterminated rule.
+function _splitCssImports(css) {
+  const marker = /@import/gi;
+  const imports = [];
+  const pieces = [];
+  let cursor = 0, kept = 0;
+  while (cursor < css.length) {
+    marker.lastIndex = cursor;
+    const match = marker.exec(css);
+    if (!match) break;
+    const start = match.index;
+    if (!/\s/.test(css[start + 7] || "")) { cursor = start + 7; continue; }
+    let end = start + 7, quote = "", depth = 0, comment = false;
+    for (; end < css.length; end++) {
+      const ch = css[end];
+      if (comment) {
+        if (ch === "*" && css[end + 1] === "/") { comment = false; end++; }
+      } else if (quote) {
+        if (ch === "\\") end++;
+        else if (ch === quote) quote = "";
+      } else if (ch === "/" && css[end + 1] === "*") {
+        comment = true; end++;
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === "(") depth++;
+      else if (ch === ")" && depth) depth--;
+      else if ((ch === ";" || ch === "{") && !depth) break;
+    }
+    // An unterminated rule, including one followed by a block, stays intact.
+    if (end >= css.length || css[end] !== ";") break;
+    let pos = start + 7;
+    while (pos < end && /\s/.test(css[pos])) pos++;
+    const urlFunction = css.slice(pos, pos + 4).toLowerCase() === "url(";
+    if (urlFunction) {
+      pos += 4;
+      while (pos < end && /\s/.test(css[pos])) pos++;
+    }
+    let target = "";
+    if (css[pos] === '"' || css[pos] === "'") {
+      const delimiter = css[pos++], begin = pos;
+      while (pos < end && css[pos] !== delimiter) {
+        if (css[pos] === "\\") pos++;
+        pos++;
+      }
+      if (pos < end) target = css.slice(begin, pos++);
+    } else {
+      const begin = pos;
+      while (pos < end && !/[\s)'"]/.test(css[pos])
+          && (urlFunction || css[pos] !== ";")) pos++;
+      target = css.slice(begin, pos);
+    }
+    if (!target) { cursor = end + 1; continue; }
+    while (pos < end && /\s/.test(css[pos])) pos++;
+    if (urlFunction && css[pos] !== ")") { cursor = end + 1; continue; }
+    if (css[pos] === ")") pos++;
+    const media = css.slice(pos, end).trim();
+    pieces.push(css.slice(kept, start));
+    imports.push({ target, media });
+    cursor = end + 1;
+    kept = cursor;
+  }
+  pieces.push(css.slice(kept));
+  return { css: pieces.join(""), imports };
+}
+
 async function _fetchLinkedCss(url, pageOrigin, depth = 0, seen = new Set()) {
   if (depth > 4 || seen.has(url)) return "";
   seen.add(url);
@@ -559,21 +623,15 @@ async function _fetchLinkedCss(url, pageOrigin, depth = 0, seen = new Set()) {
     throw new Error("Stylesheet fetch failed: " + url);
   }
   let css = parsed.body || "";
+  // Removing imports lets the renderer consume the materialized rules.
+  const split = _splitCssImports(css);
+  css = split.css;
   const imports = [];
-  // @import is only valid before ordinary rules. Removing it here lets the
-  // renderer consume the imported rules from the materialized <style>.
-  css = css.replace(
-    /@import\s+(?:url\(\s*)?(?:"([^"]+)"|'([^']+)'|([^'"\s;)]+))\s*\)?\s*([^;]*);/gi,
-    (statement, doubleQuoted, singleQuoted, bare, media) => {
-      const target = doubleQuoted || singleQuoted || bare || "";
-      if (_cssImportApplies(media || "")) {
-        try {
-          imports.push(new URL(target, url).href);
-        } catch(e) {}
-      }
-      return "";
+  for (const { target, media } of split.imports) {
+    if (_cssImportApplies(media)) {
+      try { imports.push(new URL(target, url).href); } catch(e) {}
     }
-  );
+  }
   const imported = await Promise.all(imports.map(importUrl =>
     _fetchLinkedCss(importUrl, pageOrigin, depth + 1, new Set(seen))
   ));
@@ -702,6 +760,7 @@ globalThis._formChecked = globalThis._formChecked || {};
 globalThis._formIndeterminate = globalThis._formIndeterminate || {};
 const _eventRegistry = globalThis._eventRegistry;
 const _formValues = globalThis._formValues;
+const _formTextareaDefaults = Object.create(null);
 const _formChecked = globalThis._formChecked;
 const _formIndeterminate = globalThis._formIndeterminate;
 const _domParse = (cmd, a1, a2) => { try { return JSON.parse(_dom(cmd, a1, a2)); } catch { return null; } };
@@ -3916,7 +3975,12 @@ class Element extends Node {
       }
       return;
     }
-    _formValues[this._nid] = String(v);
+    const nextValue = String(v);
+    if (tag === 'textarea' && _formValues[this._nid] === undefined) _formTextareaDefaults[this._nid] = this.textContent;
+    _formValues[this._nid] = nextValue;
+    if ((tag === 'input' || tag === 'textarea') && Deno.core.ops.op_form_paint_value) {
+      Deno.core.ops.op_form_paint_value(this._nid, nextValue, false, _realmFrameId);
+    }
     if (tag === 'textarea') {
       this.textContent = String(v);
     }
@@ -3997,7 +4061,10 @@ class Element extends Node {
     if (_formChecked[this._nid] !== undefined) return _formChecked[this._nid];
     return this.hasAttribute("checked");
   }
-  set checked(v) { _formChecked[this._nid] = !!v; }
+  set checked(v) {
+    _formChecked[this._nid] = !!v;
+    if (Deno.core.ops.op_form_paint_checked) Deno.core.ops.op_form_paint_checked(this._nid, _formChecked[this._nid], false, _realmFrameId);
+  }
   // `indeterminate` is IDL-only: it has no content attribute to reflect, so
   // the property itself must exist on the prototype for `'indeterminate' in
   // el` to be true on a freshly created element. It is node-keyed like
@@ -11281,7 +11348,18 @@ globalThis.HTMLFormElement = class HTMLFormElement extends Element {
   get length() { return this.elements.length; }
   // Inherit submit() from Element.prototype: it dispatches the cancelable
   // 'submit' event and (if not prevented) builds form data and navigates.
-  reset() { for (const f of this.elements) { if ('value' in f) f.value = ''; } }
+  reset() { for (const f of this.elements) {
+    const tag = f.localName, type = (f.getAttribute('type') || '').toLowerCase();
+    if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
+      delete _formChecked[f._nid];
+      if (Deno.core.ops.op_form_paint_checked) Deno.core.ops.op_form_paint_checked(f._nid, false, true, _realmFrameId);
+      f.value = '';
+    } else if (tag === 'textarea' || (tag === 'input' && ['', 'text', 'search', 'url', 'tel', 'email', 'number', 'password'].includes(type))) {
+      delete _formValues[f._nid];
+      if (Deno.core.ops.op_form_paint_value) Deno.core.ops.op_form_paint_value(f._nid, '', true, _realmFrameId);
+      if (tag === 'textarea' && _formTextareaDefaults[f._nid] !== undefined) { f.textContent = _formTextareaDefaults[f._nid]; delete _formTextareaDefaults[f._nid]; }
+    } else if ('value' in f) f.value = '';
+  } }
 };
 globalThis.HTMLSelectElement = Element;
 globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends Element {

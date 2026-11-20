@@ -133,11 +133,16 @@ async fn assert_binary_fetch_body(stealth: bool) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn fetch_preserves_binary_request_body() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     assert_binary_fetch_body(false).await;
 }
 
 #[cfg(feature = "stealth")]
 #[tokio::test(flavor = "current_thread")]
 async fn stealth_fetch_preserves_binary_request_body() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     assert_binary_fetch_body(true).await;
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

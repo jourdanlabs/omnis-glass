@@ -15,6 +15,7 @@ fn output_directory() -> std::path::PathBuf {
 
 #[test]
 fn screenshot_is_captured_after_eval_scrolls_the_live_page() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let directory = output_directory();
     std::fs::create_dir_all(&directory).expect("temporary output directory");
     let top = directory.join("top.png");
@@ -74,6 +75,7 @@ fn screenshot_is_captured_after_eval_scrolls_the_live_page() {
 
 #[test]
 fn screenshots_use_live_animation_time_unless_harness_pins_a_sample() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let directory = output_directory();
     std::fs::create_dir_all(&directory).expect("temporary output directory");
     let live = directory.join("live.png");
@@ -125,6 +127,7 @@ fn screenshots_use_live_animation_time_unless_harness_pins_a_sample() {
 
 #[test]
 fn paired_capture_reasserts_scroll_after_the_post_eval_settle() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let directory = output_directory();
     std::fs::create_dir_all(&directory).expect("temporary output directory");
     let screenshot = directory.join("reasserted.png");
@@ -180,6 +183,7 @@ fn paired_capture_reasserts_scroll_after_the_post_eval_settle() {
 
 #[test]
 fn paired_capture_evaluates_state_after_final_scroll_reassert() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let directory = output_directory();
     std::fs::create_dir_all(&directory).expect("temporary output directory");
     let screenshot = directory.join("capture-boundary.png");
@@ -252,3 +256,6 @@ fn paired_capture_evaluates_state_after_final_scroll_reassert() {
 
     std::fs::remove_dir_all(directory).expect("remove temporary output directory");
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

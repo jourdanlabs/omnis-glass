@@ -536,6 +536,7 @@ mod tests {
 
     #[tokio::test]
     async fn dom_focus_sets_active_element() {
+        let _glass_isolated_state = crate::domains::dom::glass_fixture_env::isolated_state();
         // CDP clients (browser-use) focus an input via DOM.focus before typing;
         // dispatchKeyEvent then targets document.activeElement. DOM.focus must
         // actually move focus or keystrokes land on nothing.
@@ -576,6 +577,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn scroll_into_view_if_needed_resolves_all_node_identifiers() {
+        let _glass_isolated_state = crate::domains::dom::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session = Some(format!("{page_id}-session"));
@@ -639,6 +641,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn scroll_into_view_if_needed_requires_a_node_identifier() {
+        let _glass_isolated_state = crate::domains::dom::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session = Some(format!("{page_id}-session"));
@@ -682,6 +685,7 @@ mod tests {
     // serialize_node this test aborts with SIGABRT.
     #[test]
     fn get_document_deep_tree_does_not_overflow() {
+        let _glass_isolated_state = crate::domains::dom::glass_fixture_env::isolated_state();
         use obscura_dom::{DomTree, NodeData};
 
         // Build the deep chain directly (no parser) so setup is O(n) and fast.
@@ -726,6 +730,7 @@ mod tests {
     /// as Page.navigate to `file://`, which defaults to off.
     #[tokio::test(flavor = "current_thread")]
     async fn set_file_input_files_refuses_without_allow_file_access() {
+        let _glass_isolated_state = crate::domains::dom::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session = Some(format!("{page_id}-session"));
@@ -769,6 +774,7 @@ mod tests {
     // Chrome does, while leaving genuinely fractional ones as floats.
     #[test]
     fn box_model_integral_coordinates_serialize_as_integers() {
+        let _glass_isolated_state = crate::domains::dom::glass_fixture_env::isolated_state();
         assert_eq!(serde_json::to_string(&coord_value(256.0)).unwrap(), "256");
         assert_eq!(serde_json::to_string(&coord_value(0.0)).unwrap(), "0");
         // fractional coordinates stay floats
@@ -786,3 +792,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

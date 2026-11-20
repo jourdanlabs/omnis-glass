@@ -1,0 +1,5 @@
+[package]
+name = "glass-build-info"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"

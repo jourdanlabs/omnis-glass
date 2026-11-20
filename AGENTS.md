@@ -12,6 +12,12 @@ capabilities. It targets web scraping and AI-agent automation.
 
 ## Build
 
+For a stamped rendering release, run `scripts/build-release.sh` from a clean
+worktree. It builds both binaries, enumerates release tests, then stamps and
+prints the versions and hashes. Test enumeration can relink `omnis-glass`;
+the release pin must cover that post-enumeration binary. Set
+`GLASS_RELEASE_TARGET` to `$CARGO_TARGET_DIR/release` when using a custom target.
+
 ```bash
 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo build --release -p obscura-cli --bins --features render
 
@@ -46,7 +52,8 @@ cargo nextest run --release --features render --no-fail-fast
 
 `cargo test` runs the whole test binary in one process, but the engine holds a
 single V8 isolate per process, so the runtime tests fail under it. `nextest`
-runs each test in its own process, which is the only supported way.
+runs each test in its own process, which is the only supported way. Mirror
+frame tests are timed for the release profile; debug builds allow longer waits.
 
 The authoritative behavioral gate is the **obstacle course** in the companion
 repo `obscura-benchmark` (33 capability + speed stages, must stay 33/33):

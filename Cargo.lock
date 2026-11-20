@@ -1714,6 +1714,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-build-info"
+version = "0.1.0"
+
+[[package]]
 name = "glass-capture"
 version = "0.1.0"
 dependencies = [
@@ -1761,13 +1765,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures-util",
+ "glass-build-info",
  "glass-govern",
  "glass-pane-bridge",
  "glass-pane-ui",
  "obscura-cdp",
  "serde_json",
  "tao",
+ "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "wry",
 ]
 
@@ -1781,10 +1789,13 @@ dependencies = [
  "glass-govern",
  "glass-ledger",
  "glass-terminus",
+ "hex",
+ "image",
  "obscura-cdp",
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "tempfile",
  "tokio",
@@ -3128,6 +3139,9 @@ dependencies = [
  "base64",
  "futures-util",
  "glass-govern",
+ "glass-ledger",
+ "glass-pane-bridge",
+ "hex",
  "image",
  "libc",
  "obscura-browser",
@@ -3138,6 +3152,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "tempfile",
  "thiserror 2.0.18",
@@ -3154,6 +3169,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "glass-build-info",
  "glass-capture",
  "glass-govern",
  "glass-ledger",

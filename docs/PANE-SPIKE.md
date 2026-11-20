@@ -20,7 +20,7 @@
 - CDP response `error.message` contains **`REFUSE`** / **`TERMINUS`** (host not on lane allowlist).
 - **`browser.actions.jsonl`** in `$OMNIS_GLASS_STATE_DIR` contains a line with `"verdict":"REFUSE"` and `"action":"navigate"`.
 
-**Conclusion:** Inbound CDP over WebSocket hits the same chokepoint as in-process dispatch (`server.rs:process_cdp_message` → `dispatch::dispatch` → `gate_cdp_command`). **`--attach` ships in v1.1.**
+**Conclusion:** This proves the inbound gate for the tested command; it does not prove that a second connection can see another connection's page. Each CDP connection owns its own pages. Attach uses the token-authorized `Glass.*` observer surface to list targets and route commands and screencast frames to their owning connection. The pane control lock lives in the server process. MCP stdio sessions run in a different process and are not visible to the pane in v1.1. Human mouse events are not receipted one by one; navigation they cause follows the existing navigation gate and receipt path.
 
 ```
 cargo test -p obscura-cdp --test inbound_cdp_gate -- --nocapture
@@ -33,7 +33,7 @@ cargo test -p obscura-cdp --test inbound_cdp_gate -- --nocapture
 | 1 | Live frames without MCP poll? | `Page.startScreencast` → `Page.screencastFrame` | **Use CDP screencast** — B2 test |
 | 3 | CDP endpoint auth? | v1 had open WS; v1.1 adds path token | **Required by default** (`cdp_auth_required()` → `true`) |
 | 4 | Co-launch single Page? | `glass-pane --co-launch` | **Default mode** |
-| 5 | Human navigate bypass? | `gate_pane_navigate` before CDP | **Enforced in bridge** |
+| 5 | Human navigate bypass? | Engine gates the routed navigation | **One engine gate** |
 | 6 | Screencast stealth? | Observer-only raster | **No extra DOM APIs** |
 
 ## B2 / B3 (un-stubbed)
@@ -43,6 +43,18 @@ cargo test -p obscura-cdp --test inbound_cdp_gate -- --nocapture
 
 ## Gate decision
 
-**`--attach` ships.** CDP auth required by default. Pane uses token-authenticated CDP URL.
+The spike alone does not establish cross-connection attach. The observer surface provides that route when enabled; both the CDP token and the separate observer token are required.
 
 — Spike closed with test evidence. 👊 + 🔑
+
+The webview navigation lock is the first layer: only the embedded `glass-pane://localhost` UI can load, new windows are refused, and IPC checks the request origin. The per-launch IPC token is the second layer and is checked on each message.
+
+The attach decision above predates the current CDP server architecture and does not establish shared-page attachment on this head. Each WebSocket connection has its own CDP context and pages (`crates/obscura-cdp/src/server.rs`, `run_connection`); an independent pane connection cannot see the agent connection’s page. Shared-page attachment requires engine support.
+
+## Observer control refusals
+
+| Method | Refusal |
+|---|---|
+| `Glass.takeControl` | `CONTROL_HELD` when another observer owns control |
+| `Glass.release` | `NOT_CONTROL_OWNER` unless sent by the owner |
+| `Glass.humanCommand` | `NOT_CONTROL_OWNER` unless sent by the owner |

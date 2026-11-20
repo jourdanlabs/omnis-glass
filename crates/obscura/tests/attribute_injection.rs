@@ -8,6 +8,7 @@ use obscura::Browser;
 
 #[tokio::test]
 async fn attribute_name_cannot_inject_js() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let browser = Browser::new().unwrap();
     let mut page = browser.new_page().await.unwrap();
     page.goto("data:text/html,<div id=x data-safe=ok></div>")
@@ -35,6 +36,7 @@ async fn attribute_name_cannot_inject_js() {
 
 #[tokio::test]
 async fn attribute_reads_ordinary_names() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let browser = Browser::new().unwrap();
     let mut page = browser.new_page().await.unwrap();
     page.goto("data:text/html,<div id=x data-safe=ok></div>")
@@ -48,3 +50,6 @@ async fn attribute_reads_ordinary_names() {
         "escaping must not break reading a normal attribute name"
     );
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

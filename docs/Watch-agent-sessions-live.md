@@ -4,6 +4,14 @@ Obscura is headless, so an agent driving it through MCP, Puppeteer, or Playwrigh
 
 This guide builds a small live viewer on top of `obscura serve`. It uses only Node's built-in modules and its native WebSocket client (Node 21+).
 
+## Glass Pane observer
+
+Glass Pane uses the observer contract on a server started with `--pane-observer`. Connect with `glass-pane --attach <ws-url> --cdp-token <token> --observer-token <observer-token>`; the observer token can also be supplied as `OMNIS_GLASS_PANE_OBSERVER_TOKEN`. The observer and CDP tokens are separate. The pane follows the most recently active page, or accepts `--target <connectionId>/<targetId>` to pin a page. If there are no pages, it opens its own blank page. MCP stdio sessions run in another process and are not visible to this observer in v1.1. Mouse input is not individually receipted; navigation caused by input follows the existing navigation gate and receipt path.
+
+The pane and server must use the same state folder (`--state-dir` or `OMNIS_GLASS_STATE_DIR`), or the receipt rail will show the wrong ledger.
+
+The standalone viewer below uses an ordinary CDP connection. On the current per-connection server it cannot view pages owned by another client; use the observer pane for that purpose.
+
 ## How it works
 
 1. Start the CDP server:
@@ -18,7 +26,7 @@ obscura serve --port 9222
 node watch.mjs
 ```
 
-3. Open http://localhost:8080 in a browser. Every page the agent navigates to appears there, updating as the page paints.
+3. Open http://localhost:8080 in a browser. The script shows pages available on its own CDP connection.
 
 The script attaches to the CDP endpoint, captures the current page twice a second with `Page.captureScreenshot`, and forwards JPEG frames to your browser over Server-Sent Events.
 
@@ -163,7 +171,7 @@ connect().catch(retry);
 > For a packaged version with adaptive pacing (fast while painting, idle back-off) and multi-page handling, see `tools/live-view.mjs`.
 ## Things worth knowing
 
-- **Why captureScreenshot polling instead of screencast.** `Page.startScreencast` frames stream to the CDP session that drives the page, so once an agent session takes over, a passive viewer session stops receiving frames. It also only produces frames when the page paints something new. An explicit `Page.captureScreenshot` always reflects the current page state regardless of which session navigated, which makes it the reliable choice for watching someone else's session.
+- **Connection scope.** The example polls `Page.captureScreenshot` on its own connection. It cannot see another connection’s pages on the current server; the Glass observer routes frames from the owning connection.
 - **Acknowledge every frame.** Without `Page.screencastFrameAck`, frame delivery stops.
 - **One client per page socket.** If an agent's CDP client already holds the page's `webSocketDebuggerUrl`, connecting to it again fails with `503`. Attach through the browser endpoint instead (`ws://127.0.0.1:9222/devtools/browser`) using `Target.attachToTarget` with `flatten: true`, then pass the returned session id as `sessionId` on every command.
 - **Still images vs continuous view.** The MCP server exposes `browser_screenshot` for one-shot captures. Screencast is the right tool when you want to watch continuously; it stays CDP-only by design.
@@ -172,6 +180,10 @@ connect().catch(retry);
 
 With `obscura serve` running and the viewer open:
 
-1. Navigate from another client, for example `obscura fetch https://example.com` through a separate worker, or any Puppeteer/Playwright/MCP session connected to port 9222.
+1. Navigate a page on the viewer’s own CDP connection. A separate client or MCP stdio session is not visible to this script.
 2. The tab shows the page within a second of it painting.
 3. Closing the viewer tab and reopening it resumes from the most recent frame.
+
+Scripts run in one page at a time. A page that is not the working page keeps its content but loses its scripts, timers, and event handlers until it is loaded again; the pane shows a notice while the displayed page has stopped scripts, and Reload brings them back.
+
+`Glass.listTargets` includes the boolean `scriptsStopped` for each page. When it changes, authorized observers receive `Glass.scriptsStoppedChanged` with `connectionId`, `targetId`, and `scriptsStopped`; the change does not create a frame or an action receipt.

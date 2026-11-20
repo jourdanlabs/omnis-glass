@@ -47,6 +47,7 @@ fn spawn_server() -> String {
 
 #[tokio::test(flavor = "current_thread")]
 async fn textarea_idl_matches_browser_semantics() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server();
 
@@ -87,6 +88,7 @@ async fn textarea_idl_matches_browser_semantics() {
 #[cfg(feature = "render")]
 #[tokio::test(flavor = "current_thread")]
 async fn textarea_gets_intrinsic_control_box() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server();
 
@@ -119,3 +121,6 @@ async fn textarea_gets_intrinsic_control_box() {
     assert_eq!(probes["display"], "inline-block");
     assert_eq!(probes["value_roundtrip"], "hi");
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

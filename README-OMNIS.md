@@ -26,4 +26,6 @@ Configure via `browser-lanes.yaml` or `OMNIS_GLASS_LANES`. Default lane: `browse
 
 ## License
 
-Apache 2.0 — includes Obscura upstream attribution in NOTICE.
+Business Source License 1.1 (see `LICENSE`). You may use OMNIS GLASS in production, including inside your own organization, except to offer it, or something built from it, to others in competition with Forseti Research. Each version converts to Apache 2.0 four years after it is published. Version 1.0 stays under Apache 2.0.
+
+Code from the upstream Obscura project stays under Apache 2.0 (`LICENSE-APACHE-2.0`), with its attribution in `NOTICE`. The `obscura-dom` and `obscura` crates are upstream code and keep the Apache 2.0 licence.

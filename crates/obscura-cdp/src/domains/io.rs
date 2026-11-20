@@ -195,6 +195,7 @@ mod tests {
 
     #[test]
     fn reads_chunks_then_frees() {
+        let _glass_isolated_state = crate::domains::io::glass_fixture_env::isolated_state();
         let mut store = IoStreamStore::with_limits(4, 1024);
         let h = store.insert(b"hello".to_vec()).unwrap();
 
@@ -212,6 +213,7 @@ mod tests {
 
     #[test]
     fn read_offset_seeks_and_zero_size_does_not_advance() {
+        let _glass_isolated_state = crate::domains::io::glass_fixture_env::isolated_state();
         let mut store = IoStreamStore::with_limits(2, 1024);
         let handle = store.insert(b"abcdef".to_vec()).unwrap();
 
@@ -228,6 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_rejects_negative_or_non_integer_ranges() {
+        let _glass_isolated_state = crate::domains::io::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let handle_id = ctx.io_streams.insert(b"data".to_vec()).unwrap();
         for params in [
@@ -241,6 +244,7 @@ mod tests {
 
     #[test]
     fn evicts_oldest_over_entry_cap() {
+        let _glass_isolated_state = crate::domains::io::glass_fixture_env::isolated_state();
         let mut store = IoStreamStore::with_limits(3, 1024);
         let h0 = store.insert(vec![0]).unwrap();
         let h1 = store.insert(vec![1]).unwrap();
@@ -257,6 +261,7 @@ mod tests {
 
     #[test]
     fn evicts_over_byte_cap_and_rejects_oversized_body() {
+        let _glass_isolated_state = crate::domains::io::glass_fixture_env::isolated_state();
         let mut store = IoStreamStore::with_limits(4, 10);
         let h0 = store.insert(vec![0u8; 8]).unwrap();
         let h1 = store.insert(vec![1u8; 8]).unwrap(); // 16 > 10 -> h0 evicted
@@ -271,6 +276,7 @@ mod tests {
 
     #[test]
     fn requested_read_size_is_capped() {
+        let _glass_isolated_state = crate::domains::io::glass_fixture_env::isolated_state();
         let mut store = IoStreamStore::with_limits(2, MAX_READ_CHUNK * 2);
         let handle = store.insert(vec![7u8; MAX_READ_CHUNK + 17]).unwrap();
         let (first, eof) = store.read(&handle, None, usize::MAX).unwrap();
@@ -281,3 +287,6 @@ mod tests {
         assert!(eof);
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

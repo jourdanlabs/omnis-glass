@@ -67,9 +67,13 @@ async fn navigate_user_agent(stealth: bool) -> String {
 
 #[tokio::test(flavor = "current_thread")]
 async fn stealth_transport_requires_compile_time_and_runtime_opt_in() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     std::env::set_var("OBSCURA_PROFILE", "0");
 
     assert_eq!(navigate_user_agent(true).await, STEALTH_USER_AGENT);
     assert_eq!(navigate_user_agent(false).await, ORDINARY_USER_AGENT);
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

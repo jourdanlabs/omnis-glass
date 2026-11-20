@@ -97,6 +97,7 @@ fn response_request_id(ctx: &CdpContext, url_needle: &str) -> Option<String> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn js_fetch_emits_network_request_and_response() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = serve().await;
     let mut ctx = CdpContext::new();
@@ -150,6 +151,7 @@ async fn js_fetch_emits_network_request_and_response() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn navigation_without_script_fetch_is_unaffected() {
+    let _fixture_state = fixture_support::local_fixture();
     // A page that issues no script fetch must still emit exactly its document
     // request, proving the #406 change adds nothing spurious.
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
@@ -185,3 +187,6 @@ async fn navigation_without_script_fetch_is_unaffected() {
         "no spurious script-fetch events for a page that makes none; saw {urls:?}"
     );
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

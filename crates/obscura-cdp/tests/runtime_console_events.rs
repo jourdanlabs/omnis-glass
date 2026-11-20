@@ -69,6 +69,7 @@ fn events<'a>(ctx: &'a CdpContext, method: &str) -> Vec<(Option<&'a str>, &'a Va
 
 #[tokio::test(flavor = "current_thread")]
 async fn navigation_emits_console_arguments_and_uncaught_exception_details() {
+    let _fixture_state = fixture_support::local_fixture();
     let mut ctx = CdpContext::new();
     let (_, session) = create_and_attach(&mut ctx).await;
     cdp(&mut ctx, 1, "Runtime.enable", json!({}), Some(&session)).await;
@@ -166,6 +167,7 @@ async fn navigation_emits_console_arguments_and_uncaught_exception_details() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_events_only_reach_sessions_while_runtime_is_enabled() {
+    let _fixture_state = fixture_support::local_fixture();
     let mut ctx = CdpContext::new();
     let (target_id, first) = create_and_attach(&mut ctx).await;
     let second = attach(&mut ctx, &target_id, 902).await;
@@ -254,3 +256,6 @@ async fn runtime_events_only_reach_sessions_while_runtime_is_enabled() {
     assert_eq!(retained["result"]["value"], 0.0);
     assert!(events(&ctx, "Runtime.consoleAPICalled").is_empty());
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

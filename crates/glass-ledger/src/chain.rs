@@ -1,5 +1,5 @@
 use std::fs::{create_dir_all, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -27,6 +27,9 @@ impl BrowserActionWriter {
         create_dir_all(state_dir)?;
         let ledger_path = state_dir.join("browser.actions.jsonl");
         let key_path = state_dir.join("writer.key");
+        // Lock the ledger during key initialization as well as appends.
+        let file = OpenOptions::new().create(true).append(true).read(true).open(&ledger_path)?;
+        crate::lock_ledger_file(&file, &ledger_path)?;
         let signer = crate::sign::load_or_create_signer(&key_path)?;
         Ok(Self {
             ledger_path,
@@ -34,15 +37,34 @@ impl BrowserActionWriter {
         })
     }
 
-    fn chain_head(&self) -> Option<String> {
-        if !self.ledger_path.exists() {
-            return None;
+    fn chain_head(file: &mut std::fs::File, path: &Path) -> std::io::Result<Option<String>> {
+        let mut end = file.seek(SeekFrom::End(0))?;
+        if end == 0 { return Ok(None); }
+        let mut byte = [0u8; 1];
+        file.seek(SeekFrom::Start(end - 1))?;
+        file.read_exact(&mut byte)?;
+        let damaged = || std::io::Error::new(std::io::ErrorKind::InvalidData,
+            format!("ledger's last record is damaged: {}", path.display()));
+        if byte[0] != b'\n' { return Err(damaged()); }
+        end -= 1;
+        let mut start = end;
+        let mut chunk = [0u8; 4096];
+        while start > 0 {
+            let len = start.min(chunk.len() as u64) as usize;
+            start -= len as u64;
+            file.seek(SeekFrom::Start(start))?;
+            file.read_exact(&mut chunk[..len])?;
+            if let Some(pos) = chunk[..len].iter().rposition(|&b| b == b'\n') {
+                start += pos as u64 + 1;
+                break;
+            }
         }
-        let file = std::fs::File::open(&self.ledger_path).ok()?;
-        let reader = BufReader::new(file);
-        let last = reader.lines().filter_map(|l| l.ok()).last()?;
-        let v: Value = serde_json::from_str(&last).ok()?;
-        v.get("sig").and_then(|s| s.as_str()).map(str::to_string)
+        file.seek(SeekFrom::Start(start))?;
+        let mut line = vec![0; (end - start) as usize];
+        file.read_exact(&mut line)?;
+        let value: Value = serde_json::from_slice(&line).map_err(|_| damaged())?;
+        let sig = value.get("sig").and_then(|s| s.as_str()).filter(|s| !s.is_empty()).ok_or_else(damaged)?;
+        Ok(Some(sig.to_string()))
     }
 
     /// Append a redacted `browser.action` receipt. Raw secrets must never appear in `fields`.
@@ -72,7 +94,9 @@ impl BrowserActionWriter {
             fields.insert("outcome".into(), Value::String(o.to_string()));
         }
         let redacted = redact_action_fields(action, lane, verdict, fields);
-        let prev = self.chain_head();
+        let mut file = OpenOptions::new().create(true).append(true).read(true).open(&self.ledger_path)?;
+        crate::lock_ledger_file(&file, &self.ledger_path)?;
+        let prev = Self::chain_head(&mut file, &self.ledger_path)?;
         let mut body = Map::new();
         body.insert("receipt".into(), Value::String("browser.action".into()));
         body.insert("canon_version".into(), Value::Number(3.into()));
@@ -100,11 +124,11 @@ impl BrowserActionWriter {
         rec.insert("signature".into(), Value::String(signature));
 
         let line = serde_json::to_string(&Value::Object(rec))?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.ledger_path)?;
-        writeln!(file, "{line}")?;
+        let line = format!("{line}\n");
+        if file.write(line.as_bytes())? != line.len() {
+            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "short record write"));
+        }
+        file.flush()?;
         Ok(serde_json::from_str(&line).unwrap_or(Value::Null))
     }
 }
@@ -238,6 +262,23 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[test]
+    fn trailing_space_cannot_replace_the_final_newline() {
+        let dir = tempdir().unwrap();
+        let writer = BrowserActionWriter::new(dir.path()).unwrap();
+        writer.write_action("navigate", "browse:research", "ALLOW", Map::new()).unwrap();
+        let path = dir.path().join("browser.actions.jsonl");
+        let original = std::fs::read(&path).unwrap();
+        assert_eq!(original.last(), Some(&b'\n'));
+        let mut damaged = original.clone(); *damaged.last_mut().unwrap() = b' ';
+        std::fs::write(&path, &damaged).unwrap();
+        assert!(writer.write_action("navigate", "browse:research", "ALLOW", Map::new()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+        std::fs::write(&path, original).unwrap();
+        writer.write_action("navigate", "browse:research", "ALLOW", Map::new()).unwrap();
+        let verified = verify_chain(&path, None); assert!(verified.ok); assert_eq!(verified.count, 2);
+    }
 
     #[test]
     fn chain_links_and_tamper_detected() {

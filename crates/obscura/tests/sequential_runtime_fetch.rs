@@ -80,6 +80,7 @@ async fn run_browser(base: &str) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn sequential_browsers_complete_concurrent_fetch_and_xhr() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server();
 
@@ -87,3 +88,6 @@ async fn sequential_browsers_complete_concurrent_fetch_and_xhr() {
         run_browser(&base).await;
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

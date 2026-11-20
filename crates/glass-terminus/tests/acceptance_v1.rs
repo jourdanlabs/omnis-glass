@@ -70,7 +70,7 @@ fn a3_live_capture_sha256_matches() {
         CaptureSource::PageContent,
         CaptureKind::Live,
         Some(200),
-        Some("tls-fingerprint-abc".into()),
+        None,
     )
     .expect("live capture");
     let writer = WebCaptureWriter::new(dir.path()).unwrap();
@@ -216,4 +216,27 @@ fn a9_weaken_secret_check_would_fail() {
     let v = gate.authorize(&env);
     // On allowed host, secret still REFUSE via terminus scanner
     assert_eq!(v.verdict, "REFUSE");
+}
+
+#[test]
+fn key_event_secret_is_scanned_without_digest() {
+    let dir = tempdir().unwrap();
+    test_env(&dir.path().to_path_buf());
+    let gate = TerminusGate::new(dir.path());
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890";
+    let mut env = OutboundEnvelope::browser(
+        BrowserAction::Type, target_from_url("https://example.com").unwrap(),
+        Some(json!({"field_value": secret})), &gate.lane, &gate.policy.version,
+        &gate.policy.coverage_class, "key-secret",
+    );
+    env.key_event = Some(true);
+    let verdict = gate.authorize(&env);
+    assert_eq!(verdict.verdict, "REFUSE", "{verdict:?}");
+    assert_eq!(verdict.decision, "REFUSE_SECRET");
+    let ledger = std::fs::read_to_string(dir.path().join("terminus.actions.jsonl")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
+    assert!(record["payload_digest"].is_null());
+    assert_eq!(record["chars"], secret.chars().count());
+    assert_eq!(record["reason"], "bearer_secret");
+    assert!(!ledger.contains(secret));
 }

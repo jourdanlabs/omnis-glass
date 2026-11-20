@@ -28,26 +28,44 @@ fn session_urls() -> &'static Mutex<std::collections::HashMap<String, String>> {
     SESSION_URL.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+fn normalized_session_id(session_id: &str) -> &str {
+    if session_id.is_empty() { "default" } else { session_id }
+}
+
 pub fn session_id_key(session_id: &str) -> String {
-    if session_id.is_empty() {
-        "default".into()
-    } else {
-        session_id.into()
+    let session_id = normalized_session_id(session_id);
+    match session::command_context().and_then(|context| context.session_namespace) {
+        Some(namespace) => format!("{namespace}/{session_id}"),
+        None => session_id.into(),
     }
 }
 
 fn current_page_url(session_id: &str) -> String {
-    session_urls()
-        .lock()
-        .ok()
-        .and_then(|m| m.get(session_id).cloned())
+    let key = session_id_key(session_id);
+    session_urls().lock().ok().and_then(|m| m.get(&key).cloned())
         .unwrap_or_else(|| "about:blank".into())
 }
 
 pub fn record_navigation(session_id: &str, url: &str) {
+    if let Ok(mut m) = session_urls().lock() { m.insert(session_id_key(session_id), url.to_string()); }
+}
+
+/// Update a connection-owned session outside its command scope.
+pub fn record_connection_navigation(namespace: &str, session_id: &str, url: &str) {
     if let Ok(mut m) = session_urls().lock() {
-        m.insert(session_id_key(session_id), url.to_string());
+        m.insert(format!("{namespace}/{}", normalized_session_id(session_id)), url.to_string());
     }
+}
+
+pub fn forget_connection_session(namespace: &str, session_id: &str) {
+    if let Ok(mut m) = session_urls().lock() {
+        m.remove(&format!("{namespace}/{}", normalized_session_id(session_id)));
+    }
+}
+
+pub fn forget_connection_navigation(namespace: &str) {
+    let prefix = format!("{namespace}/");
+    if let Ok(mut m) = session_urls().lock() { m.retain(|key, _| !key.starts_with(&prefix)); }
 }
 
 pub fn governance_enabled() -> bool {
@@ -66,7 +84,7 @@ pub fn gate_browser_action(
         url,
         payload,
         session_id,
-        GateNetworkContext::strict(),
+        GateNetworkContext::with_allow_private(session::command_context().map(|c| c.allow_private_network).unwrap_or(false)),
     )
 }
 
@@ -125,25 +143,30 @@ pub fn gate_browser_action_with_context(
     session_id: &str,
     ctx: GateNetworkContext,
 ) -> Result<(), String> {
-    if session_id != "pane-human" && session::agent_blocked() {
-        return Err("TERMINUS REFUSE (session_locked): REFUSE_SESSION_LOCKED".into());
+    gate_browser_action_with_receipt_context(action, url, payload, session_id, ctx, false)
+}
+
+fn gate_browser_action_with_receipt_context(
+    action: BrowserAction,
+    url: &str,
+    payload: Option<Value>,
+    session_id: &str,
+    ctx: GateNetworkContext,
+    key_event: bool,
+) -> Result<(), String> {
+    let command = session::command_context();
+    let is_human = command.as_ref().map(|c| c.driver == Driver::Human).unwrap_or(false);
+    if !is_human && session::agent_blocked() {
+        return Err(record_session_locked_refusal(action.as_str(), url));
     }
 
-    let driver = if session_id == "pane-human" {
-        Driver::Human
-    } else {
-        session::current_driver()
-    };
+    let driver = command.as_ref().map(|c| c.driver).unwrap_or(Driver::Agent);
 
     let target = target_from_url(url).map_err(|e| format!("TERMINUS REFUSED (invalid_target): {e}"))?;
 
     let gate = gate().lock().map_err(|_| "TERMINUS REFUSED (gate_lock)".to_string())?;
-    let lane = if session_id == "pane-human" {
-        std::env::var("OMNIS_GLASS_LANE_HUMAN").unwrap_or_else(|_| "browse:human".into())
-    } else {
-        gate.lane.clone()
-    };
-    let envelope = OutboundEnvelope::browser(
+    let lane = command.and_then(|c| c.lane).unwrap_or_else(|| gate.lane.clone());
+    let mut envelope = OutboundEnvelope::browser(
         action,
         target,
         payload.clone(),
@@ -153,17 +176,24 @@ pub fn gate_browser_action_with_context(
         &session_id_key(session_id),
     );
 
+    if key_event { envelope.key_event = Some(true); }
     session::set_inflight(action.as_str());
     let verdict = gate.authorize_with_network(
         &envelope,
         ctx.allow_private_network,
         ctx.enforce_override,
     );
+    // Never hold the process-wide policy lock while waiting on a ledger file.
+    drop(gate);
     let mut fields = Map::new();
     fields.insert("url".into(), json!(url));
     if let Some(p) = payload {
         if let Some(v) = p.get("field_value").and_then(|x| x.as_str()) {
-            fields.insert("field_value".into(), json!(v));
+            if key_event {
+                fields.insert("chars".into(), json!(v.chars().count()));
+            } else {
+                fields.insert("field_value".into(), json!(v));
+            }
         }
         if let Some(v) = p.get("post_body").and_then(|x| x.as_str()) {
             fields.insert("post_body".into(), json!(v));
@@ -185,16 +215,10 @@ pub fn gate_browser_action_with_context(
         Driver::Human => "human",
         Driver::Agent => "agent",
     };
-    if let Ok(writer) = BrowserActionWriter::new(&state_dir()) {
-        let _ = writer.write_action_with_meta(
-            action.as_str(),
-            &lane,
-            &verdict.verdict,
-            fields,
-            Some(driver_str),
-            None,
-        );
-    }
+    let receipt = BrowserActionWriter::new(&state_dir()).and_then(|writer| {
+        writer.write_action_with_meta(action.as_str(), &lane, &verdict.verdict, fields, Some(driver_str), None)
+    });
+    if let Err(error) = &receipt { eprintln!("browser action receipt write failed: {error}"); }
     session::clear_inflight();
 
     if verdict.verdict != "ALLOW" {
@@ -203,15 +227,23 @@ pub fn gate_browser_action_with_context(
             verdict.verdict, verdict.reason, verdict.decision
         ));
     }
+    if receipt.is_err() { return Err("TERMINUS REFUSE (ledger_unavailable): REFUSE_LEDGER_UNAVAILABLE".into()); }
     Ok(())
 }
 
-/// Human pane navigate — always uses pane-human session + human lane.
-pub fn gate_pane_navigate(url: &str) -> Result<(), String> {
-    if !matches!(session::current_mode(), session::PaneMode::Human) {
-        return Err("TERMINUS REFUSE (mirror_readonly): pane is in mirror mode".into());
+/// Record a lock refusal already decided atomically by the session state.
+/// This must not re-authorize the action if control changes before the write.
+pub fn record_session_locked_refusal(action: &str, url: &str) -> String {
+    session::mark_agent_waiting();
+    let lane = session::command_context().and_then(|c| c.lane).unwrap_or_else(|| std::env::var("OMNIS_GLASS_LANE").unwrap_or_else(|_| "browse:research".into()));
+    let mut fields = Map::new();
+    fields.insert("url".into(), json!(url));
+    fields.insert("reason".into(), json!("REFUSE_SESSION_LOCKED"));
+    if let Err(error) = BrowserActionWriter::new(&state_dir()).and_then(|writer| writer.write_action_with_meta(action, &lane, "REFUSE", fields, Some("agent"), None)) {
+        eprintln!("browser action refusal receipt write failed: {error}");
+        return "TERMINUS REFUSE (ledger_unavailable): REFUSE_LEDGER_UNAVAILABLE".into();
     }
-    gate_browser_action(BrowserAction::Navigate, url, None, "pane-human")
+    "TERMINUS REFUSE (session_locked): REFUSE_SESSION_LOCKED".into()
 }
 
 /// Record cancellation receipt on handoff (Fix 3).
@@ -220,16 +252,17 @@ pub fn record_handoff_cancel(action: &str) {
     let mut fields = Map::new();
     fields.insert("action".into(), json!(action));
     fields.insert("verdict".into(), json!("CANCELLED"));
-    if let Ok(writer) = BrowserActionWriter::new(&state_dir()) {
-        let _ = writer.write_action_with_meta(
-            action,
-            &lane,
-            "CANCELLED",
-            fields,
-            Some("agent"),
-            Some("cancelled_by_handoff"),
-        );
-    }
+    if let Err(error) = BrowserActionWriter::new(&state_dir()).and_then(|writer| {
+        writer.write_action_with_meta(action, &lane, "CANCELLED", fields, Some("agent"), Some("cancelled_by_handoff"))
+    }) { eprintln!("handoff cancellation receipt write failed: {error}"); }
+
+}
+
+/// Authorize a CDP navigation and hand its initial GET to the outbound gate once.
+pub fn gate_approved_navigation(url: &str, session_id: &str) -> Result<(), String> {
+    gate_browser_action(BrowserAction::Navigate, url, None, session_id)?;
+    session::approve_http_navigation(url);
+    Ok(())
 }
 
 pub fn gate_cdp_command(method: &str, params: &Value, session_id: &Option<String>) -> Option<String> {
@@ -239,9 +272,14 @@ pub fn gate_cdp_command(method: &str, params: &Value, session_id: &Option<String
         .unwrap_or("default");
 
     let err = match method {
+        "Target.createTarget" => {
+            let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("about:blank");
+            if url.is_empty() || url == "about:blank" { None }
+            else { gate_approved_navigation(url, sid).err() }
+        }
         "Page.navigate" => {
             let url = params.get("url")?.as_str()?;
-            gate_browser_action(BrowserAction::Navigate, url, None, sid).err()
+            gate_approved_navigation(url, sid).err()
         }
         "Input.insertText" => {
             let text = params.get("text")?.as_str()?;
@@ -258,11 +296,13 @@ pub fn gate_cdp_command(method: &str, params: &Value, session_id: &Option<String
             if text.is_empty() {
                 return None;
             }
-            gate_browser_action(
+            gate_browser_action_with_receipt_context(
                 BrowserAction::Type,
                 &current_page_url(sid),
                 Some(json!({"field_value": text})),
                 sid,
+                GateNetworkContext::with_allow_private(session::command_context().map(|c| c.allow_private_network).unwrap_or(false)),
+                true,
             )
             .err()
         }

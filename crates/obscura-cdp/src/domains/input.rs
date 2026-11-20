@@ -125,7 +125,20 @@ pub async fn handle(
                             globalThis.__obscura_click_target = target;\
                             globalThis.__obscura_mouse_down = {{target:target,button:{button_code},clickCount:{click_count}}};\
                             var evt = globalThis.__obscura_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
-                            target.dispatchEvent(evt);\
+                            if (target.dispatchEvent(evt) && {button_code} === 0) {{\
+                                var focusTarget = target;\
+                                while (focusTarget && focusTarget.nodeType === 1) {{\
+                                    var tag = focusTarget.localName;\
+                                    var focusable = (tag === 'input' && (focusTarget.getAttribute('type') || '').toLowerCase() !== 'hidden') || tag === 'textarea' || tag === 'select' || tag === 'button' || ((tag === 'a' || tag === 'area') && focusTarget.hasAttribute('href')) || focusTarget.hasAttribute('tabindex') || focusTarget.hasAttribute('contenteditable');\
+                                    if (focusable && !(tag === 'input' && (focusTarget.getAttribute('type') || '').toLowerCase() === 'hidden') && !globalThis.__obscura_isDisabled(focusTarget)) break;\
+                                    focusTarget = focusTarget.parentElement;\
+                                }}\
+                                var old = document.activeElement;\
+                                if (focusTarget !== old && !(focusTarget === null && old === document.body)) {{\
+                                    if (old && old !== document.body) {{ old.blur(); old.dispatchEvent(new Event('blur')); old.dispatchEvent(new Event('focusout', {{bubbles:true}})); }}\
+                                    if (focusTarget) {{ focusTarget.focus(); focusTarget.dispatchEvent(new Event('focus')); focusTarget.dispatchEvent(new Event('focusin', {{bubbles:true}})); }}\
+                                }}\
+                            }}\
                         }})()",
                         x = x,
                         y = y,
@@ -243,6 +256,8 @@ pub async fn handle(
                     None
                 };
                 if let Some((page_id, frame_id, url)) = moved_frame {
+                    #[cfg(feature = "render")]
+                    crate::domains::page::invalidate_target_screencasts(ctx, session_id);
                     let loader_id = ctx
                         .current_loader_ids
                         .get(&page_id)

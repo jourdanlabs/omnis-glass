@@ -2,20 +2,26 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; base-uri 'none'; form-action 'none'" />
   <title>OMNIS GLASS — Glass Pane</title>
   <link rel="stylesheet" href="pane.css" />
 </head>
 <body>
   <header>
     <span id="mode-badge" class="badge mirror">MIRROR</span>
+    <button id="btn-back" class="human-control" disabled>Back</button>
+    <button id="btn-forward" class="human-control" disabled>Forward</button>
+    <button id="btn-reload" class="human-control" disabled>Reload</button>
     <input id="url-bar" type="text" readonly placeholder="URL" />
     <button id="btn-take" type="button">Take control</button>
     <button id="btn-release" type="button" hidden>Release</button>
   </header>
   <main>
-    <canvas id="viewport" width="1280" height="720"></canvas>
-    <aside id="rail"><h2>Actions</h2><ul id="rail-list"></ul></aside>
+    <canvas tabindex="0" id="viewport" width="1280" height="720"></canvas>
+    <aside id="rail"><h2>Actions</h2><p id="capture"></p><ul id="rail-list"></ul></aside>
   </main>
+  <p id="scripts-stopped" hidden>This page's scripts were stopped when the agent used another page. Typing reaches its fields, but the page's own code will not react. Reload restarts them.</p>
+  <p id="status" role="status">Connecting…</p>
   <script src="pane.js"></script>
 </body>
 </html>

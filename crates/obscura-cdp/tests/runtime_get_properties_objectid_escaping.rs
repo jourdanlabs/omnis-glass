@@ -76,6 +76,7 @@ const SETUP: &str = r#"(function () {
 
 #[tokio::test(flavor = "current_thread")]
 async fn get_properties_walks_into_a_child_whose_key_holds_a_control_character() {
+    let _fixture_state = fixture_support::local_fixture();
     let mut ctx = CdpContext::new();
     let page_id = ctx.create_page();
     let session_id = "session-1";
@@ -170,6 +171,7 @@ const SETUP_NODES: &str = r#"(function () {
 
 #[tokio::test(flavor = "current_thread")]
 async fn describe_node_resolves_a_child_handle_whose_key_holds_a_control_character() {
+    let _fixture_state = fixture_support::local_fixture();
     let mut ctx = CdpContext::new();
     let page_id = ctx.create_page();
     let session_id = "session-1";
@@ -228,3 +230,6 @@ async fn describe_node_resolves_a_child_handle_whose_key_holds_a_control_charact
         );
     }
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

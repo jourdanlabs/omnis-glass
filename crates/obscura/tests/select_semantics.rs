@@ -44,6 +44,7 @@ fn spawn_server() -> String {
 
 #[tokio::test(flavor = "current_thread")]
 async fn select_defaults_match_browser_semantics() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server();
 
@@ -82,6 +83,7 @@ async fn select_defaults_match_browser_semantics() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn select_without_explicit_selection_defaults_to_first_option() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server();
 
@@ -99,3 +101,6 @@ async fn select_without_explicit_selection_defaults_to_first_option() {
     assert_eq!(probes["index"], 0);
     assert_eq!(probes["value"], "a");
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

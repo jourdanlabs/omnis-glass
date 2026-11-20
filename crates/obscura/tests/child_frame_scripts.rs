@@ -115,6 +115,7 @@ fn spawn_server(parent_html: &'static str) -> String {
 
 #[tokio::test]
 async fn a_child_frame_runs_its_own_script() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(PARENT_HTML);
 
@@ -149,6 +150,7 @@ async fn a_child_frame_runs_its_own_script() {
 
 #[tokio::test]
 async fn a_child_frame_set_by_attribute_runs_its_own_script() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(ATTRIBUTE_PARENT_HTML);
 
@@ -170,6 +172,7 @@ async fn a_child_frame_set_by_attribute_runs_its_own_script() {
 
 #[tokio::test]
 async fn a_shadow_dom_child_frame_stays_alive_and_runs_its_script() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(SHADOW_PARENT_HTML);
 
@@ -193,6 +196,7 @@ async fn a_shadow_dom_child_frame_stays_alive_and_runs_its_script() {
 /// its result back out. This is the reporter's `parentGot` assertion.
 #[tokio::test]
 async fn a_child_frame_reaches_its_parent_with_post_message() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(MESSAGING_PARENT_HTML);
 
@@ -221,6 +225,7 @@ async fn a_child_frame_reaches_its_parent_with_post_message() {
 /// The other direction: a page talking into its frame.
 #[tokio::test]
 async fn a_parent_reaches_its_child_with_post_message() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(MESSAGING_PARENT_HTML);
 
@@ -244,6 +249,7 @@ async fn a_parent_reaches_its_child_with_post_message() {
 /// forever.
 #[tokio::test]
 async fn window_post_message_delivers_to_the_same_window() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(
         r#"<!doctype html><html><body><script>
@@ -272,6 +278,7 @@ async fn window_post_message_delivers_to_the_same_window() {
 /// delivered.
 #[tokio::test]
 async fn window_post_message_honours_target_origin() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(
         r#"<!doctype html><html><body><script>
@@ -299,6 +306,7 @@ async fn window_post_message_honours_target_origin() {
 /// nothing used to start its load at all.
 #[tokio::test]
 async fn a_static_child_frame_runs_its_own_script() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(STATIC_PARENT_HTML);
 
@@ -320,6 +328,7 @@ async fn a_static_child_frame_runs_its_own_script() {
 
 #[tokio::test]
 async fn a_rejected_child_frame_does_not_leave_js_references() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     std::env::set_var("OBSCURA_MAX_LIVE_FRAMES", "0");
     let base = spawn_server(STATIC_PARENT_HTML);
@@ -346,6 +355,7 @@ async fn a_rejected_child_frame_does_not_leave_js_references() {
 
 #[tokio::test]
 async fn navigating_blank_releases_child_realms() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(STATIC_PARENT_HTML);
 
@@ -361,6 +371,7 @@ async fn navigating_blank_releases_child_realms() {
 
 #[tokio::test]
 async fn changing_iframe_src_releases_the_previous_realm() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(RESET_PARENT_HTML);
 
@@ -379,3 +390,6 @@ async fn changing_iframe_src_releases_the_previous_realm() {
         );
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

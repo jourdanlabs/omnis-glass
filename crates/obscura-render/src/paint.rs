@@ -135,6 +135,8 @@ struct RememberedContentImageIntrinsic {
 /// paints. Entries are FIFO-bounded by both count and retained byte size.
 /// Successful bytes use `Arc` so consumers never clone an image/font body.
 pub struct RenderResourceCache {
+    form_values: HashMap<obscura_dom::tree::NodeId, String>,
+    form_checked: HashMap<obscura_dom::tree::NodeId, bool>,
     entries: HashMap<String, CachedResource>,
     order: VecDeque<String>,
     retained_bytes: usize,
@@ -174,6 +176,8 @@ impl RenderResourceCache {
         max_bytes: usize,
     ) -> Self {
         Self {
+            form_values: HashMap::new(),
+            form_checked: HashMap::new(),
             entries: HashMap::new(),
             order: VecDeque::new(),
             retained_bytes: 0,
@@ -187,6 +191,40 @@ impl RenderResourceCache {
             sync_loading_enabled: true,
             loader: Box::new(loader),
         }
+    }
+
+    /// Native paint-only copies of live form values. They never alter DOM attributes.
+    pub fn form_value(&self, node: obscura_dom::tree::NodeId) -> Option<&str> { self.form_values.get(&node).map(String::as_str) }
+
+    pub fn set_form_value(&mut self, node: obscura_dom::tree::NodeId, value: Option<&str>) -> bool {
+        let value = value.map(|value| {
+            let end = value.char_indices().nth(4096).map(|(index, _)| index).unwrap_or(value.len());
+            value[..end].to_owned()
+        });
+        self.set_form_value_owned(node, value)
+    }
+
+    pub fn set_form_value_owned(&mut self, node: obscura_dom::tree::NodeId, value: Option<String>) -> bool {
+        match value {
+            Some(mut value) => {
+                if let Some((end, _)) = value.char_indices().nth(4096) { value.truncate(end); }
+                if self.form_values.get(&node).is_some_and(|old| old == &value) { return false; }
+                self.form_values.insert(node, value); true
+            }
+            None => self.form_values.remove(&node).is_some(),
+        }
+    }
+
+    pub fn form_checked(&self, node: obscura_dom::tree::NodeId) -> Option<bool> { self.form_checked.get(&node).copied() }
+
+    pub fn set_form_checked(&mut self, node: obscura_dom::tree::NodeId, checked: Option<bool>) {
+        if let Some(checked) = checked { self.form_checked.insert(node, checked); }
+        else { self.form_checked.remove(&node); }
+    }
+
+    pub fn remove_form_values(&mut self, nodes: &std::collections::HashSet<obscura_dom::tree::NodeId>) {
+        self.form_values.retain(|node, _| !nodes.contains(node));
+        self.form_checked.retain(|node, _| !nodes.contains(node));
     }
 
     /// Temporarily control the compatibility loader used by synchronous
@@ -3700,6 +3738,12 @@ fn paint_laid_dom_scrolled(
         };
 
         if node.is_text() {
+            // A live textarea is painted from its native value, not its DOM text.
+            if crate::dom::rendered_parent(tree, nid).is_some_and(|parent| {
+                image_cache.form_values.contains_key(&parent)
+                    && tree.get_node(parent).is_some_and(|node| node.as_element()
+                        .is_some_and(|name| name.local.as_ref() == "textarea"))
+            }) { continue; }
             if let Some(items) = laid.word_ifc_items.get(&nid) {
                 let offset = scroll_state.translation_for(laid, nid);
                 let overflow_clip = scroll_state.shaped_text_overflow_clip_for(laid, nid);
@@ -4650,17 +4694,73 @@ fn paint_laid_dom_scrolled(
             }
         }
 
+        if name.local.as_ref() == "input" {
+            let kind = node.get_attribute("type").unwrap_or("").to_ascii_lowercase();
+            if matches!(kind.as_str(), "checkbox" | "radio") {
+                let checked = image_cache.form_checked(nid).unwrap_or_else(|| node.get_attribute("checked").is_some());
+                paint_checkable(&mut pixmap, rect, kind == "radio", checked,
+                    checkable_is_disabled(tree, nid), element_clip_mask, raster_scale);
+            }
+        }
+
+        // Live values are native paint state, not reflected DOM attributes.
+        let tag = name.local.as_ref();
+        let input_type = node.get_attribute("type").unwrap_or("").to_ascii_lowercase();
+        if tag == "input" && matches!(input_type.as_str(), "submit" | "reset" | "button") {
+            let label = node.get_attribute("value").unwrap_or_else(|| match input_type.as_str() {
+                "submit" => "Submit", "reset" => "Reset", _ => "",
+            });
+            if !label.is_empty() {
+                let size = style.font_size.unwrap_or(16.0);
+                let bold = crate::style::used_font_weight(style) >= 600;
+                let spacing = style.letter_spacing.unwrap_or(0.0);
+                let width = measure_text(label, size, bold, style.font_family.as_deref())
+                    + spacing * label.chars().count().saturating_sub(1) as f32;
+                let line_height = crate::inline::used_line_height(style);
+                draw_text(&mut pixmap, label, rect.x + (rect.width - width) / 2.0,
+                    rect.y + (rect.height - line_height) / 2.0,
+                    style.color.unwrap_or([0, 0, 0, 255]), size, bold,
+                    style.font_family.as_deref(), spacing, Some(visible_rect), element_clip_mask, raster_scale);
+            }
+        }
+        let text_control = tag == "textarea" || (tag == "input" && matches!(input_type.as_str(), "" | "text" | "search" | "url" | "tel" | "email" | "number" | "password"));
+        let live_value = if text_control { image_cache.form_values.get(&nid) } else { None };
+        if let Some(value) = live_value.filter(|value| !value.is_empty()) {
+            let displayed = if tag == "input" && input_type == "password" { "•".repeat(value.chars().count()) } else { value.clone() };
+            let content = crate::Rect {
+                x: rect.x + style.border.left + style.padding.left,
+                y: rect.y + style.border.top + style.padding.top,
+                width: (rect.width - style.border.left - style.border.right - style.padding.left - style.padding.right).max(0.0),
+                height: (rect.height - style.border.top - style.border.bottom - style.padding.top - style.padding.bottom).max(0.0),
+            };
+            let text_clip = match clip { Some(clip) => content.intersect(&clip), None => Some(content) };
+            if let Some(mut text_clip) = text_clip {
+                // draw_text synthesizes bold with extra device pixels; reserve
+                // their width inside this control's clip at scaled captures.
+                if crate::style::used_font_weight(style) >= 600 && raster_scale > 1.0 {
+                    text_clip.width = (text_clip.width - (raster_scale.ceil() - 1.0) / raster_scale).max(0.0);
+                }
+                let line_height = crate::inline::used_line_height(style);
+                for (line, text) in displayed.split('\n').enumerate() {
+                    draw_text(&mut pixmap, text, content.x, content.y + line as f32 * line_height,
+                        style.color.unwrap_or([0, 0, 0, 255]), style.font_size.unwrap_or(16.0),
+                        crate::style::used_font_weight(style) >= 600, style.font_family.as_deref(),
+                        style.letter_spacing.unwrap_or(0.0), Some(text_clip), element_clip_mask, raster_scale);
+                }
+            }
+        }
+
         // An empty text `<input>`/`<textarea>` shows its `placeholder`
         // attribute as muted text; there is no DOM text node for it (it is
         // not real content), so paint it directly from the attribute instead
         // of going through `paint_text_node`.
         if name.local.as_ref() == "input" || name.local.as_ref() == "textarea" {
-            let has_value = node
+            let has_value = live_value.map(|value| !value.is_empty()).unwrap_or_else(|| node
                 .get_attribute("value")
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
                 || (name.local.as_ref() == "textarea"
-                    && !tree.text_content(nid).is_empty());
+                    && !tree.text_content(nid).is_empty()));
             if !has_value {
                 if let Some(placeholder) = node.get_attribute("placeholder") {
                     if !placeholder.is_empty() {
@@ -4716,6 +4816,8 @@ fn paint_laid_dom_scrolled(
     // box backgrounds/borders painted in the loop above. Each item already
     // carries its final origin and clip from `TextEngine::finalize`.
     for nid in paint_nodes {
+        if image_cache.form_values.contains_key(&nid) && tree.get_node(nid).is_some_and(|node|
+            node.as_element().is_some_and(|name| name.local.as_ref() == "textarea")) { continue; }
         if svg_subtree_skip.contains(&nid) || opacity_subtree_skip.contains(&nid) {
             continue;
         }
@@ -6629,6 +6731,62 @@ fn clip_text_fill_color(style: &crate::LayoutStyle) -> Option<[u8; 4]> {
         .background_color
         .filter(|c| c[3] != 0)
         .map(|c| [c[0], c[1], c[2], 255])
+}
+
+fn checkable_is_disabled(tree: &DomTree, node: obscura_dom::tree::NodeId) -> bool {
+    let Some(element) = tree.get_node(node) else { return false; };
+    if element.get_attribute("disabled").is_some() { return true; }
+    let mut child = node;
+    let mut parent = element.parent;
+    while let Some(id) = parent {
+        let Some(ancestor) = tree.get_node(id) else { break; };
+        if ancestor.as_element().is_some_and(|name| name.local.as_ref() == "fieldset")
+            && ancestor.get_attribute("disabled").is_some() {
+            let first_legend = tree.children(id).into_iter().find(|child| tree.get_node(*child)
+                .is_some_and(|node| node.as_element().is_some_and(|name| name.local.as_ref() == "legend")));
+            if first_legend != Some(child) { return true; }
+        }
+        child = id;
+        parent = ancestor.parent;
+    }
+    false
+}
+
+fn paint_checkable(pixmap: &mut Pixmap, rect: crate::Rect, radio: bool, checked: bool,
+    disabled: bool, mask: Option<&tiny_skia::Mask>, scale: f32) {
+    let side = rect.width.min(rect.height);
+    if side <= 0.0 { return; }
+    let x = rect.x + (rect.width - side) / 2.0;
+    let y = rect.y + (rect.height - side) / 2.0;
+    let inset = (side * 0.09).max(1.0).min(side / 4.0);
+    let mut border = Paint::default();
+    let shade = if disabled { 160 } else { 65 };
+    border.set_color(Color::from_rgba8(shade, shade, shade, 255));
+    let mut inner = Paint::default();
+    let fill = if disabled { 235 } else { 255 };
+    inner.set_color(Color::from_rgba8(fill, fill, fill, 255));
+    let outer_path = if radio { PathBuilder::from_circle(x + side / 2.0, y + side / 2.0, side / 2.0) }
+        else { Rect::from_xywh(x, y, side, side).map(PathBuilder::from_rect) };
+    let inner_path = if radio { PathBuilder::from_circle(x + side / 2.0, y + side / 2.0, side / 2.0 - inset) }
+        else { Rect::from_xywh(x + inset, y + inset, side - 2.0 * inset, side - 2.0 * inset).map(PathBuilder::from_rect) };
+    if let Some(path) = outer_path { pixmap.fill_path(&path, &border, FillRule::Winding, raster_transform(scale), mask); }
+    if let Some(path) = inner_path { pixmap.fill_path(&path, &inner, FillRule::Winding, raster_transform(scale), mask); }
+    if checked {
+        if radio {
+            if let Some(path) = PathBuilder::from_circle(x + side / 2.0, y + side / 2.0, side * 0.23) {
+                pixmap.fill_path(&path, &border, FillRule::Winding, raster_transform(scale), mask);
+            }
+        } else {
+            let mut mark = PathBuilder::new();
+            mark.move_to(x + side * 0.23, y + side * 0.52);
+            mark.line_to(x + side * 0.43, y + side * 0.71);
+            mark.line_to(x + side * 0.77, y + side * 0.30);
+            if let Some(path) = mark.finish() {
+                let stroke = tiny_skia::Stroke { width: (side * 0.12).max(1.0), ..Default::default() };
+                pixmap.stroke_path(&path, &border, &stroke, raster_transform(scale), mask);
+            }
+        }
+    }
 }
 
 /// Paint every word of a text node at its own laid-out position. A text node
@@ -11561,6 +11719,181 @@ mod tests {
         assert_eq!(display("#authored-inline"), "inline");
         assert_eq!(display("#authored-block"), "block");
         assert_eq!(display("#authored-inline-block"), "inline-block");
+    }
+
+    fn live_field_picture(tag: &str, value: Option<&str>) -> Vec<u8> {
+        let tree = parse_html(&format!(r#"<html><head><style>html,body {{ margin:0; background:white }} #field {{ position:absolute; left:20px; top:20px; width:110px; height:60px; box-sizing:border-box; padding:2px; border:1px solid black; font:20px sans-serif; color:black; background:white }}</style></head><body>{tag}</body></html>"#));
+        let mut resources = RenderResourceCache::default();
+        if let Some(value) = value { let node = tree.query_selector("#field").unwrap().unwrap_or_else(|| obscura_dom::NodeId::new(u32::MAX)); resources.set_form_value(node, Some(value)); }
+        let mut prepared = prepare_dom(&tree, (180.0, 120.0), None, &mut resources).unwrap();
+        paint_prepared(&tree, &mut prepared, &mut resources, (0.0, 0.0)).unwrap().data().to_vec()
+    }
+
+    #[test]
+    fn unused_checked_state_preserves_page_pixels() {
+        let tree = parse_html("<html><body><p>ordinary page</p></body></html>");
+        let mut resources = RenderResourceCache::default();
+        let mut prepared = prepare_dom(&tree, (100.0, 100.0), None, &mut resources).unwrap();
+        let before = paint_prepared(&tree, &mut prepared, &mut resources, (0.0, 0.0)).unwrap().data().to_vec();
+        resources.set_form_checked(obscura_dom::NodeId::new(u32::MAX), Some(true));
+        let after = paint_prepared(&tree, &mut prepared, &mut resources, (0.0, 0.0)).unwrap().data().to_vec();
+        assert!(before == after);
+    }
+
+    #[test]
+    fn disabled_checkable_is_lighter() {
+        let enabled = live_field_picture(r#"<input id="field" type="checkbox" checked>"#, None);
+        let disabled = live_field_picture(r#"<input id="field" type="checkbox" checked disabled>"#, None);
+        let dark = |image: &[u8]| image.chunks_exact(4).filter(|pixel| pixel[0] < 100).count();
+        assert!(dark(&disabled) < dark(&enabled));
+        let tree = parse_html(r#"<fieldset disabled><legend><input id="legend" type="radio"></legend><input id="field" type="checkbox"></fieldset>"#);
+        assert!(!checkable_is_disabled(&tree, tree.query_selector("#legend").unwrap().unwrap()));
+        assert!(checkable_is_disabled(&tree, tree.query_selector("#field").unwrap().unwrap()));
+    }
+
+    #[test]
+    fn checkbox_checked_changes_only_its_box() {
+        let tree = parse_html(r#"<html><head><style>html,body { margin:0; background:white } #field { position:absolute; left:20px; top:20px; width:30px; height:30px; margin:0 }</style></head><body><input id="field" type="checkbox"></body></html>"#);
+        let node = tree.query_selector("#field").unwrap().unwrap();
+        let mut resources = RenderResourceCache::default();
+        let mut prepared = prepare_dom(&tree, (100.0, 100.0), None, &mut resources).unwrap();
+        let before = paint_prepared(&tree, &mut prepared, &mut resources, (0.0, 0.0)).unwrap().data().to_vec();
+        resources.set_form_checked(node, Some(true));
+        let after = paint_prepared(&tree, &mut prepared, &mut resources, (0.0, 0.0)).unwrap().data().to_vec();
+        let mut changed = 0;
+        for y in 0..100 { for x in 0..100 {
+            let offset = (y * 100 + x) * 4;
+            if before[offset..offset+4] != after[offset..offset+4] {
+                assert!((20..50).contains(&x) && (20..50).contains(&y), "changed outside checkbox at {x},{y}"); changed += 1;
+            }
+        } }
+        assert!(changed > 0);
+    }
+
+    #[test]
+    fn input_button_labels_are_centered_and_clipped() {
+        let send = live_field_picture(r#"<input id="field" type="submit" value="send">"#, None);
+        let stop = live_field_picture(r#"<input id="field" type="submit" value="stop">"#, None);
+        assert!(send != stop, "different labels must change the picture");
+        let mut left = 130; let mut right = 20;
+        for y in 25..75 { for x in 25..125 { if send[(y * 180 + x) * 4] < 128 {
+            left = left.min(x); right = right.max(x);
+        } } }
+        assert!(left < right && ((left + right) as i32 - 150).abs() <= 8, "label must be centered: {left}..{right}");
+        let long = live_field_picture(r#"<input id="field" type="submit" value="MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM">"#, None);
+        for y in 0..120 { for x in 0..180 { if !(20..130).contains(&x) || !(20..80).contains(&y) {
+            let offset = (y * 180 + x) * 4;
+            assert_eq!(&send[offset..offset+4], &long[offset..offset+4], "outside at {x},{y}");
+        } } }
+        assert!(live_field_picture(r#"<input id="field" type="submit">"#, None)
+            == live_field_picture(r#"<input id="field" type="submit" value="Submit">"#, None));
+        assert!(live_field_picture(r#"<input id="field" type="reset">"#, None)
+            == live_field_picture(r#"<input id="field" type="reset" value="Reset">"#, None));
+        assert!(live_field_picture(r#"<input id="field" type="button">"#, None)
+            == live_field_picture(r#"<input id="field" type="button" value="">"#, None));
+    }
+
+    #[test]
+    fn live_text_values_change_picture() {
+        let field = r#"<input id="field">"#;
+        assert_ne!(live_field_picture(field, Some("abc")), live_field_picture(field, Some("abd")));
+    }
+    #[test]
+    fn live_password_values_are_masked() {
+        let field = r#"<input id="field" type="password">"#;
+        let abc = live_field_picture(field, Some("abc"));
+        assert!(abc == live_field_picture(field, Some("xyz")), "equal-length password values must render identically");
+        assert_ne!(abc, live_field_picture(field, Some("abcd")));
+        assert_ne!(abc, live_field_picture(r#"<input id="field" type="text">"#, Some("abc")));
+    }
+    #[test]
+    fn live_field_value_is_clipped() {
+        let field = r#"<input id="field">"#;
+        let empty = live_field_picture(field, Some(""));
+        let long = live_field_picture(field, Some(&"hello".repeat(200)));
+        assert_ne!(empty, long, "value must be visible inside the field");
+        for y in 0..120 { for x in 0..180 { if !(20..130).contains(&x) || !(20..80).contains(&y) {
+            let offset = (y * 180 + x) * 4; assert_eq!(&empty[offset..offset+4], &long[offset..offset+4], "outside at {x},{y}");
+        } } }
+    }
+    #[test]
+    fn empty_live_value_preserves_baseline() {
+        let field = r#"<input id="field" placeholder="hint">"#;
+        assert_eq!(live_field_picture(field, None), live_field_picture(field, Some("")));
+        assert_eq!(live_field_picture("<div>page</div>", None), live_field_picture("<div>page</div>", Some("unused native state")));
+    }
+    #[test]
+    fn live_textarea_paints_only_once() {
+        let actual = live_field_picture(r#"<textarea id="field">ab
+c</textarea>"#, Some("ab\nc"));
+        let empty = live_field_picture(r#"<textarea id="field"></textarea>"#, None);
+        let mut reference = Pixmap::from_vec(empty, tiny_skia::IntSize::from_wh(180, 120).unwrap()).unwrap();
+        let tree = parse_html(r#"<html><head><style>html,body { margin:0; background:white } #field { position:absolute; left:20px; top:20px; width:110px; height:60px; box-sizing:border-box; padding:2px; border:1px solid black; font:20px sans-serif; color:black; background:white }</style></head><body><textarea id="field">ab
+c</textarea></body></html>"#);
+        let mut resources = RenderResourceCache::default();
+        let prepared = prepare_dom(&tree, (180.0, 120.0), None, &mut resources).unwrap();
+        let field = tree.query_selector("#field").unwrap().unwrap();
+        let style = &prepared.layout.styles[&field];
+        let rect = prepared.layout.rects[&field];
+        let content = crate::Rect { x: rect.x + style.border.left + style.padding.left,
+            y: rect.y + style.border.top + style.padding.top,
+            width: rect.width - style.border.left - style.border.right - style.padding.left - style.padding.right,
+            height: rect.height - style.border.top - style.border.bottom - style.padding.top - style.padding.bottom };
+        let line_height = crate::inline::used_line_height(style);
+        for (line, text) in ["ab", "c"].iter().enumerate() {
+            draw_text(&mut reference, text, content.x, content.y + line as f32 * line_height,
+                style.color.unwrap_or([0, 0, 0, 255]), style.font_size.unwrap_or(16.0),
+                crate::style::used_font_weight(style) >= 600, style.font_family.as_deref(),
+                style.letter_spacing.unwrap_or(0.0), Some(content), None, 1.0);
+        }
+        assert!(actual == reference.data(), "textarea differs from independently drawn reference");
+    }
+    #[test]
+    fn initial_textarea_matches_afafc79() {
+        let image = live_field_picture(r#"<textarea id="field">ab
+c</textarea>"#, None);
+        let hash = image.iter().fold(14695981039346656037u64, |hash, byte|
+            (hash ^ u64::from(*byte)).wrapping_mul(1099511628211));
+        assert_eq!(hash, 0xdfbaeeff089f249d);
+    }
+    fn lane_j_textarea_picture(layout: &str, dom_text: &str, live: &str) -> Vec<u8> {
+        let markup = match layout {
+            "inline" => format!(r#"<textarea id="field" style="position:static;display:inline">{dom_text}</textarea>"#),
+            "generated" => format!(r#"<style>#field::before{{content:"Q"}}</style><textarea id="field">{dom_text}</textarea>"#),
+            _ => unreachable!(),
+        };
+        live_field_picture(&markup, Some(live))
+    }
+
+    #[test]
+    fn lane_j_inline_dom_text_is_not_painted() {
+        assert!(lane_j_textarea_picture("inline", "ab c", "zz") == lane_j_textarea_picture("inline", "", "zz"));
+    }
+    #[test]
+    fn lane_j_inline_live_value_is_painted() {
+        assert!(lane_j_textarea_picture("inline", "", "zz") != lane_j_textarea_picture("inline", "", "zy"));
+    }
+    #[test]
+    fn lane_j_inline_equal_dom_and_live_is_painted_once() {
+        assert!(lane_j_textarea_picture("inline", "zz", "zz") == lane_j_textarea_picture("inline", "", "zz"));
+    }
+    #[test]
+    fn lane_j_generated_dom_text_is_not_painted() {
+        assert!(lane_j_textarea_picture("generated", "ab c", "zz") == lane_j_textarea_picture("generated", "", "zz"));
+    }
+    #[test]
+    fn lane_j_generated_live_value_is_painted() {
+        assert!(lane_j_textarea_picture("generated", "", "zz") != lane_j_textarea_picture("generated", "", "zy"));
+    }
+    #[test]
+    fn lane_j_generated_equal_dom_and_live_is_painted_once() {
+        assert!(lane_j_textarea_picture("generated", "zz", "zz") == lane_j_textarea_picture("generated", "", "zz"));
+    }
+
+    #[test]
+    fn live_textarea_keeps_line_breaks() {
+        let field = r#"<textarea id="field"></textarea>"#;
+        assert_ne!(live_field_picture(field, Some("a\nb")), live_field_picture(field, Some("a b")));
     }
 
     #[test]

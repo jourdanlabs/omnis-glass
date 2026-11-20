@@ -2101,6 +2101,7 @@ mod tests {
 
     #[test]
     fn tool_schemas_expose_snapshot_limit_without_nested_properties() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let tools = listed_tools();
         let snapshot = tools.iter().find(|tool| tool["name"] == "browser_snapshot")
             .expect("browser_snapshot tool");
@@ -2116,6 +2117,7 @@ mod tests {
     #[cfg(not(feature = "render"))]
     #[test]
     fn render_tools_are_not_advertised_without_render_feature() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let tools = listed_tools();
         assert!(tools.iter().all(|tool| {
             tool["name"] != "browser_screenshot" && tool["name"] != "browser_pdf"
@@ -2125,6 +2127,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn render_tools_are_advertised_with_flat_schemas() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let tools = listed_tools();
         for name in ["browser_screenshot", "browser_pdf"] {
             let tool = tools.iter().find(|tool| tool["name"] == name)
@@ -2139,6 +2142,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn render_tool_calls_return_mcp_binary_content_and_reject_bad_options() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         let mut state = BrowserState::new(None, None, false);
         state.page_mut().navigate(
             "data:text/html,<html style='margin:0'><body style='margin:0;background:red'><div style='width:64px;height:48px'></div></body></html>",
@@ -2219,6 +2223,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn click_on_a_submit_button_issues_the_request_before_replying() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         // A submit click runs the page's form glue and leaves the navigation as
         // pending state; it only becomes a request when a driving layer converts
         // it. The CDP path converts it, MCP did not, so the same click POSTed
@@ -2269,7 +2274,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn browser_type_keeps_whole_value_receipts() {
+        let _state = crate::glass_fixture_env::isolated_state();
+        std::env::set_var("OMNIS_GLASS_ENFORCE", "enforce");
+        std::env::set_var("OMNIS_GLASS_LANE", "browse:research");
+        std::env::remove_var("OMNIS_GLASS_LANES");
+        let mut state = BrowserState::new(None, None, false);
+        state.page_mut().navigate("data:text/html,<input id=field>").await.unwrap();
+        state.page_mut().url = Some(url::Url::parse("https://example.com/").unwrap());
+        tool_type(&json!({"selector":"#field","text":"whole-value"}), &mut state).await.unwrap();
+        let root = glass_govern::state_dir();
+        let records = |name: &str| -> Vec<Value> {
+            std::fs::read_to_string(root.join(name)).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+        };
+        let actions = records("browser.actions.jsonl");
+        let action = actions.iter().find(|r| r["action"] == "type").unwrap();
+        assert_eq!(action["value_sha256"], glass_ledger::digest_sha256("whole-value"));
+        let mut keys: Vec<_> = action.as_object().unwrap().keys().map(String::as_str).collect(); keys.sort();
+        assert_eq!(keys, vec!["action", "canon_version", "driver", "key_id", "lane", "receipt", "sig", "signature", "ts", "url", "value_sha256", "verdict"]);
+        let gate = records("terminus.actions.jsonl");
+        let record = gate.iter().find(|r| r["action"] == "type").unwrap();
+        assert_eq!(record["payload_digest"], glass_ledger::digest_sha256(r#"{"field_value":"whole-value"}"#));
+        let mut keys: Vec<_> = record.as_object().unwrap().keys().map(String::as_str).collect(); keys.sort();
+        assert_eq!(keys, vec!["action", "canon_version", "decision", "host", "kind", "lane", "payload_digest", "prev", "reason", "receipt", "refused", "sig", "ts", "verdict"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn fill_tools_notify_controlled_input_tracker() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         mcp_glass_test_env();
         let mut state = BrowserState::new(None, None, false);
         state
@@ -2321,6 +2353,13 @@ mod tests {
         )
         .await
         .expect("browser_type should succeed");
+        let ledger = std::fs::read_to_string(glass_govern::state_dir().join("browser.actions.jsonl")).unwrap();
+        let typed = ledger.lines().map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|entry| entry["action"] == "type" && entry["value_sha256"] == glass_ledger::digest_sha256("-typed"))
+            .expect("browser_type receipt");
+        let mut keys: Vec<_> = typed.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["action", "canon_version", "driver", "key_id", "lane", "prev", "receipt", "sig", "signature", "ts", "url", "value_sha256", "verdict"]);
         tool_fill_form(
             &json!({
                 "fields": [{ "selector": "#field", "value": "form-filled" }]
@@ -2346,6 +2385,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fill_form_check_and_select_use_native_setter_and_trusted_events() {
+        let _glass_isolated_state = crate::glass_fixture_env::isolated_state();
         mcp_glass_test_env();
         let mut state = BrowserState::new(None, None, false);
         state
@@ -2417,3 +2457,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

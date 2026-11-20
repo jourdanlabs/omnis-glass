@@ -3337,8 +3337,80 @@ mod tests {
         rt
     }
 
+    fn setup_import_scanner_test() -> ObscuraJsRuntime {
+        let mut rt = setup_runtime("<html></html>");
+        let bootstrap = include_str!("../js/bootstrap.js");
+        let start = bootstrap.find("function _cssImportApplies(").unwrap();
+        let end = bootstrap.find("async function _fetchLinkedCss(").unwrap();
+        rt.execute_script("import-scanner-test", &format!(
+            "{}\nglobalThis.__testSplitCssImports = _splitCssImports; globalThis.__testCssImportApplies = _cssImportApplies;",
+            &bootstrap[start..end]
+        )).unwrap();
+        rt
+    }
+
+    #[test]
+    fn linked_css_import_scanner_preserves_rules() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
+        let mut rt = setup_import_scanner_test();
+        let cases = rt.evaluate(r#"(() => {
+            const inputs = [
+                'a @import "x.css"; b',
+                "@import 'x.css' screen;z",
+                '@import url("x.css") print; @import url(x.css) screen; tail',
+                '@IMPORT x.css all; body{}',
+                '@import "a;b.css"; @import url(a;b.css) screen; tail',
+                'before @import "unfinished; body { color: red }',
+                'before @import url(unfinished; body { color: red }',
+                'before @import x\nbody { color: red; }',
+                'İ @import "x.css"; tail',
+            ];
+            return inputs.map(__testSplitCssImports);
+        })()"#).unwrap();
+        assert_eq!(cases, serde_json::json!([
+            {"css":"a  b", "imports":[{"target":"x.css", "media":""}]},
+            {"css":"z", "imports":[{"target":"x.css", "media":"screen"}]},
+            {"css":"  tail", "imports":[{"target":"x.css", "media":"print"},{"target":"x.css", "media":"screen"}]},
+            {"css":" body{}", "imports":[{"target":"x.css", "media":"all"}]},
+            {"css":"  tail", "imports":[{"target":"a;b.css", "media":""},{"target":"a;b.css", "media":"screen"}]},
+            {"css":"before @import \"unfinished; body { color: red }", "imports":[]},
+            {"css":"before @import url(unfinished; body { color: red }", "imports":[]},
+            {"css":"before @import x\nbody { color: red; }", "imports":[]},
+            {"css":"İ  tail", "imports":[{"target":"x.css", "media":""}]},
+        ]));
+        assert_eq!(rt.evaluate(r#"(() => __testSplitCssImports(
+            '@import "screen.css" screen; @import "print.css" print; body{}'
+        ).imports.filter(i => __testCssImportApplies(i.media)).map(i => i.target))()"#).unwrap(),
+            serde_json::json!(["screen.css"]));
+    }
+
+    #[test]
+    fn linked_css_import_scanner_bounds_work() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
+        let mut rt = setup_import_scanner_test();
+        for pattern in ["@import x                    ", "@import url("] {
+            let mut times = Vec::new();
+            for size in [50_000, 100_000, 200_000] {
+                let input = pattern.repeat(size / pattern.len() + 1)[..size].to_string();
+                let expression = format!("__testSplitCssImports({})", serde_json::to_string(&input).unwrap());
+                let start = std::time::Instant::now();
+                let result = rt.evaluate_with_timeout(&expression, std::time::Duration::from_secs(3))
+                    .expect("import scanner exceeded time budget");
+                let elapsed = start.elapsed();
+                assert!(result["css"] == input, "scanner changed unterminated input");
+                assert_eq!(result["imports"], serde_json::json!([]));
+                eprintln!("{pattern:?} {size}: {elapsed:?}");
+                times.push(elapsed);
+            }
+            // A small fixed allowance absorbs timer granularity and scheduler noise.
+            assert!(times[2] <= times[0] * 5 + std::time::Duration::from_millis(20),
+                "scanner scaling: {times:?}");
+        }
+    }
+
     #[test]
     fn function_to_string_has_native_function_shape() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
 
         assert_eq!(
@@ -3373,6 +3445,7 @@ mod tests {
 
     #[test]
     fn iframe_content_window_exposes_realm_globals() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
 
         assert_eq!(
@@ -3425,6 +3498,7 @@ mod tests {
 
     #[test]
     fn document_domain_getter_and_valid_relaxation_match_effective_host() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html("<html><body></body></html>");
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(dom);
@@ -3457,6 +3531,7 @@ mod tests {
 
     #[test]
     fn document_domain_rejects_unrelated_child_and_public_suffix_hosts() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html("<html><body></body></html>");
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(dom);
@@ -3491,6 +3566,7 @@ mod tests {
 
     #[test]
     fn document_domain_detached_and_hostless_setters_throw_security_error() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         assert_eq!(
             rt.evaluate(
@@ -3537,6 +3613,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn string_timeout_handler_executes_in_global_scope() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.evaluate("var __timerValue='pending'; setTimeout('__timerValue=\"done\"', 0)")
             .unwrap();
@@ -3549,6 +3626,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn string_timeout_declarations_reach_global_scope() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // A string timer handler runs as a classic script in global scope, so a
         // top-level var/function declaration in it becomes a global. new Function()
         // kept those declarations local to the compiled function, so they never
@@ -3569,6 +3647,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn string_interval_handler_repeats_and_can_clear_itself() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.evaluate("globalThis.__ticks=0").unwrap();
         rt.evaluate(
@@ -3584,6 +3663,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn zero_delay_timer_runs_as_a_task_after_microtasks() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "zero-delay-task-order",
@@ -3604,6 +3684,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn scheduler_post_task_observes_priority_fifo_and_task_boundaries() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "scheduler-priority-order",
@@ -3658,6 +3739,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn scheduler_abort_delay_and_yield_follow_task_state() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "scheduler-abort-delay-yield",
@@ -3732,6 +3814,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn self_requeueing_message_channel_yields_to_timers() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "message-channel-task-yield",
@@ -3763,6 +3846,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn message_port_queues_until_start_and_clones_at_post_time() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "message-port-start-and-clone",
@@ -3812,6 +3896,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn message_port_onmessage_starts_and_yields_between_messages() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "message-port-task-boundaries",
@@ -3838,6 +3923,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn message_port_close_discards_delivery_already_queued_for_a_task() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "message-port-close-cancels-queued-delivery",
@@ -3860,6 +3946,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn message_port_handler_and_listener_follow_registration_order() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "message-port-mixed-registration-order",
@@ -3893,6 +3980,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn message_port_internal_state_is_hidden_and_ignores_own_property_tampering() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "message-port-hidden-state",
@@ -3929,6 +4017,7 @@ mod tests {
 
     #[test]
     fn message_port_has_browser_shaped_construction_and_clone_errors() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -3950,6 +4039,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn broadcast_channel_delivers_independent_post_time_clones_to_matching_peers() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "broadcast-channel-clone-delivery",
@@ -4005,6 +4095,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn broadcast_channel_handlers_follow_registration_order_and_task_timing() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "broadcast-channel-registration-order",
@@ -4039,6 +4130,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn broadcast_channel_close_cancels_delivery_and_closed_post_throws() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "broadcast-channel-close",
@@ -4080,6 +4172,7 @@ mod tests {
 
     #[test]
     fn performance_now_is_monotonic_under_bursty_calls() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         // Hammer performance.now() so many calls land in the same millisecond and
         // the wall clock rolls over repeatedly; the value must never go backwards.
@@ -4097,6 +4190,7 @@ mod tests {
 
     #[test]
     fn performance_now_does_not_outrun_elapsed_time() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let lead = rt
             .evaluate(
@@ -4111,6 +4205,7 @@ mod tests {
 
     #[test]
     fn time_origin_never_lands_in_the_future() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // __obscura_init deletes itself, so a realm yields one draw of the
         // origin jitter. Build a fresh runtime per draw, do not hoist this out.
         for _ in 0..40 {
@@ -4129,6 +4224,7 @@ mod tests {
 
     #[test]
     fn childnode_helpers_coerce_non_string_primitives_to_text() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime(r#"<html><body><div id="p"><span id="t">x</span></div></body></html>"#);
         let before = rt
@@ -4150,6 +4246,7 @@ mod tests {
 
     #[test]
     fn replace_state_without_url_preserves_current_location() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let path = rt
             .evaluate(
@@ -4161,6 +4258,7 @@ mod tests {
 
     #[test]
     fn push_state_without_url_preserves_current_location() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let path = rt
             .evaluate(
@@ -4172,6 +4270,7 @@ mod tests {
 
     #[test]
     fn history_exposes_the_web_platform_constructor_and_prototype() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -4201,6 +4300,7 @@ mod tests {
 
     #[test]
     fn style_attribute_parses_into_style_object() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // Inline styles present in the parsed HTML must be visible via el.style.*
         let mut rt = setup_runtime(
             r#"<html><body><div id="d" style="color: red; display: none">hi</div></body></html>"#,
@@ -4219,6 +4319,7 @@ mod tests {
 
     #[test]
     fn set_style_attribute_updates_style_object() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="d">hi</div></body></html>"#);
         let margin = rt
             .evaluate(
@@ -4230,6 +4331,7 @@ mod tests {
 
     #[test]
     fn null_namespace_style_attribute_stays_in_sync() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="d">hi</div></body></html>"#);
         let result = rt
             .evaluate(
@@ -4241,6 +4343,7 @@ mod tests {
 
     #[test]
     fn setting_style_property_updates_the_attribute_and_serialization() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="d">hi</div></body></html>"#);
         let attr = rt
             .evaluate(
@@ -4259,6 +4362,7 @@ mod tests {
 
     #[test]
     fn style_object_reflects_external_attribute_change() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // A later setAttribute('style', …) must supersede an earlier value read
         // through el.style (the declaration re-syncs from the attribute).
         let mut rt =
@@ -4273,6 +4377,7 @@ mod tests {
 
     #[test]
     fn clone_node_deep_preserves_context_sensitive_elements() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // A <tr> is not a valid child of <div>, so cloning through a throwaway
         // <div>.innerHTML dropped it and returned null. A structural clone keeps it.
         let mut rt = setup_runtime("<html><body></body></html>");
@@ -4288,6 +4393,7 @@ mod tests {
 
     #[test]
     fn clone_node_deep_copies_children_and_attributes() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><ul id="l"><li class="a">one</li><li class="b">two</li></ul></body></html>"#);
         let out = rt
             .evaluate(
@@ -4299,6 +4405,7 @@ mod tests {
 
     #[test]
     fn clone_node_deep_preserves_table_rows() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><table id="t"><tbody><tr><td>1</td><td>2</td></tr></tbody></table></body></html>"#,
         );
@@ -4314,6 +4421,7 @@ mod tests {
 
     #[test]
     fn clone_node_shallow_copies_attributes_without_children() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="d" data-x="7"><span>kid</span></div></body></html>"#);
         let out = rt
             .evaluate(
@@ -4325,6 +4433,7 @@ mod tests {
 
     #[test]
     fn clone_node_copies_js_assigned_inline_styles() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><div id='d'></div></body></html>");
         let out = rt
             .evaluate(
@@ -4336,6 +4445,7 @@ mod tests {
 
     #[test]
     fn clone_node_deep_copies_template_content() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let out = rt
             .evaluate(
@@ -4347,6 +4457,7 @@ mod tests {
 
     #[test]
     fn insert_adjacent_html_parses_table_fragments() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><table id="t"><tbody id="tb"></tbody></table></body></html>"#,
         );
@@ -4358,6 +4469,7 @@ mod tests {
 
     #[test]
     fn insert_adjacent_html_position_is_case_insensitive() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="host"><span>base</span></div></body></html>"#);
         let out = rt
             .evaluate("(function(){var h=document.getElementById('host'); h.insertAdjacentHTML('BeforeEnd','<b>x</b>'); return h.lastElementChild ? h.lastElementChild.tagName : 'NULL';})()")
@@ -4367,6 +4479,7 @@ mod tests {
 
     #[test]
     fn insert_adjacent_html_rejects_invalid_position() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="host"></div></body></html>"#);
         let out = rt
             .evaluate("(function(){var h=document.getElementById('host'); try { h.insertAdjacentHTML('nope','<b>x</b>'); return 'no-throw'; } catch(e){ return e.name; }})()")
@@ -4376,6 +4489,7 @@ mod tests {
 
     #[test]
     fn insert_adjacent_html_keeps_leading_comments_in_table_contexts() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><table><tbody id="tb"><tr id="row"></tr></tbody></table></body></html>"#,
         );
@@ -4389,6 +4503,7 @@ mod tests {
 
     #[test]
     fn insert_adjacent_html_uses_the_insertion_element_as_context() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><div id="d"></div><table id="table"><tbody id="tb"></tbody></table></body></html>"#,
         );
@@ -4402,6 +4517,7 @@ mod tests {
 
     #[test]
     fn set_attribute_ns_is_retrievable_by_namespace_and_local_name() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let v = rt
             .evaluate("(function(){var s=document.createElementNS('http://www.w3.org/2000/svg','svg'); s.setAttributeNS('http://www.w3.org/1999/xlink','xlink:href','#g'); return s.getAttributeNS('http://www.w3.org/1999/xlink','href');})()")
@@ -4411,6 +4527,7 @@ mod tests {
 
     #[test]
     fn remove_attribute_ns_removes_by_namespace() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let v = rt
             .evaluate("(function(){var s=document.createElementNS('http://www.w3.org/2000/svg','svg'); s.setAttributeNS('http://www.w3.org/1999/xlink','xlink:href','#g'); s.removeAttributeNS('http://www.w3.org/1999/xlink','href'); return s.getAttributeNS('http://www.w3.org/1999/xlink','href');})()")
@@ -4420,6 +4537,7 @@ mod tests {
 
     #[test]
     fn get_attribute_ns_reads_plain_attributes_with_null_namespace() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // Backward-compat: getAttributeNS(null, name) still reads a plain attr.
         let mut rt = setup_runtime(r#"<html><body><div id="d" title="hi"></div></body></html>"#);
         let v = rt
@@ -4430,6 +4548,7 @@ mod tests {
 
     #[test]
     fn namespaced_attribute_keeps_its_qualified_name() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let v = rt
             .evaluate("(function(){var s=document.createElementNS('http://www.w3.org/2000/svg','svg');s.setAttributeNS('http://www.w3.org/1999/xlink','xlink:href','#g');return s.getAttribute('xlink:href')+'|'+s.getAttributeNames()[0]+'|'+s.outerHTML;})()")
@@ -4439,6 +4558,7 @@ mod tests {
 
     #[test]
     fn parsed_xlink_attribute_is_available_through_both_apis() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r##"<html><body><svg><use id="u" xlink:href="#icon"></use></svg></body></html>"##,
         );
@@ -4450,6 +4570,7 @@ mod tests {
 
     #[test]
     fn set_attribute_updates_a_parsed_namespaced_attribute_in_place() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // setAttribute matched the stored attribute by local name only, so a
         // parsed `xlink:href` (prefix=xlink, local=href) was never found by the
         // qualified name "xlink:href": the update was pushed as a *second*
@@ -4466,6 +4587,7 @@ mod tests {
 
     #[test]
     fn set_attribute_ns_validates_namespace_constraints() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let v = rt
             .evaluate("(function(){var e=document.createElement('div'),out=[];for(const args of [[null,'x:y'],['urn:test','a:b:c'],['urn:test','xml:lang'],['urn:test','xmlns:x']]){try{e.setAttributeNS(args[0],args[1],'v');out.push('none')}catch(err){out.push(err.name)}}return out.join('|');})()")
@@ -4480,6 +4602,7 @@ mod tests {
 
     #[test]
     fn dom_parser_flags_malformed_xml_with_parsererror() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let has_err = rt
             .evaluate("(function(){var d=new DOMParser().parseFromString('<a><b></a>','application/xml'); return d.querySelector('parsererror') ? true : false;})()")
@@ -4489,6 +4612,7 @@ mod tests {
 
     #[test]
     fn dom_parser_accepts_well_formed_xml() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let ok = rt
             .evaluate("(function(){var d=new DOMParser().parseFromString('<root><child>x</child></root>','application/xml'); return d.querySelector('parsererror') ? 'ERR' : 'OK';})()")
@@ -4498,6 +4622,7 @@ mod tests {
 
     #[test]
     fn dom_parser_html_never_gets_parsererror() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // HTML parsing is tolerant and must never synthesize a parsererror.
         let mut rt = setup_runtime("<html><body></body></html>");
         let ok = rt
@@ -4508,6 +4633,7 @@ mod tests {
 
     #[test]
     fn custom_element_upgrade_runs_class_constructor_on_existing_element() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><svelte-like id="component"></svelte-like></body></html>"#,
         );
@@ -4543,6 +4669,7 @@ mod tests {
 
     #[test]
     fn shadow_root_children_expose_parent_siblings_and_composed_root() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -4666,6 +4793,7 @@ mod tests {
 
     #[test]
     fn shadow_root_identity_and_children_are_native_tree_backed() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -4753,6 +4881,7 @@ mod tests {
 
     #[test]
     fn create_element_synchronously_constructs_an_existing_definition() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -4802,6 +4931,7 @@ mod tests {
 
     #[test]
     fn created_foreign_element_keeps_native_qualified_name_through_clone() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let v = rt
             .evaluate(
@@ -4818,6 +4948,7 @@ mod tests {
 
     #[test]
     fn svg_path_uses_the_standard_interface_chain() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><svg><path id="shape" d="M0 0L1 1"></path></svg></body></html>"#,
         );
@@ -4870,6 +5001,7 @@ mod tests {
 
     #[test]
     fn foreign_inner_html_and_contextual_fragments_keep_svg_namespace() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let v = rt
             .evaluate(
@@ -4886,6 +5018,7 @@ mod tests {
 
     #[test]
     fn throwing_custom_element_constructor_marks_upgrade_failed_without_connecting() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><throws-during-upgrade id="target"></throws-during-upgrade></body></html>"#,
         );
@@ -4920,6 +5053,7 @@ mod tests {
 
     #[test]
     fn test_document_title() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><head><title>Test</title></head><body></body></html>");
         let title = rt.evaluate("document.title").unwrap();
         assert_eq!(title, serde_json::json!("Test"));
@@ -4958,6 +5092,7 @@ mod tests {
 
     #[test]
     fn document_title_setter_creates_missing_title_element() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><main>content</main></body></html>");
         let result = rt
             .evaluate(
@@ -4999,6 +5134,7 @@ mod tests {
 
     #[test]
     fn document_referrer_has_explicit_navigation_state() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         assert_eq!(
             rt.evaluate("document.referrer").unwrap(),
@@ -5014,6 +5150,7 @@ mod tests {
 
     #[test]
     fn global_window_has_browser_constructor_identity() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -5031,6 +5168,7 @@ mod tests {
 
     #[test]
     fn window_named_access_exposes_ids_and_eligible_names() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body>
                 <script id="payload" type="application/json">{"ready":true}</script>
@@ -5070,6 +5208,7 @@ mod tests {
 
     #[test]
     fn window_named_access_tracks_dynamic_ids_and_fragment_parsing() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><div id='host'></div></body></html>");
         let result = rt
             .evaluate(
@@ -5140,6 +5279,7 @@ mod tests {
 
     #[test]
     fn explicit_viewport_is_distinct_from_fingerprinted_screen() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html("<html><body></body></html>");
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(dom);
@@ -5159,6 +5299,7 @@ mod tests {
 
     #[test]
     fn screen_override_is_independent_live_and_preserves_screen_identity() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html("<html><body></body></html>");
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(dom);
@@ -5196,6 +5337,7 @@ mod tests {
 
     #[test]
     fn match_media_evaluates_query_lists_conjunctions_ranges_and_orientation() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html("<html><body></body></html>");
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(dom);
@@ -5228,6 +5370,7 @@ mod tests {
 
     #[test]
     fn match_media_matches_are_live_across_viewport_resizes() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html("<html><body></body></html>");
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(dom);
@@ -5263,6 +5406,7 @@ mod tests {
 
     #[test]
     fn computed_style_access_does_not_get_shadowed_by_inline_style_proxy() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><div id="box" style="opacity:.5;width:40px"></div></body></html>"#,
         );
@@ -5297,6 +5441,7 @@ mod tests {
 
     #[test]
     fn hyperlink_content_attributes_reflect_through_the_idl_surface() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body>
                 <a id="locale" hreflang="en-US" rel="alternate"
@@ -5344,6 +5489,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn ordinary_inline_keeps_computed_sizes_but_uses_content_geometry() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><head><style>
                 html,body,p { margin:0 }
@@ -5455,6 +5601,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn computed_style_uses_renderer_stylesheet_cascade_and_invalidates() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><head><style>
                 .base {
@@ -5546,6 +5693,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn webkit_truncation_computed_names_use_native_support_and_vendor_prefixes() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><head><style>
               #clamp { display:-webkit-box; -webkit-box-orient:vertical;
@@ -5595,6 +5743,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn computed_typography_uses_resolved_renderer_values() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><head><style>
                 #parent {
@@ -5638,6 +5787,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn computed_style_exposes_cascaded_custom_properties_and_invalidates() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><head><style>
                 :root { --inherited-space: 17px; --derived-space: var(--inherited-space); }
@@ -5706,6 +5856,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn idle_event_loop_flushes_resolved_promise_continuations() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><div id='state'>pending</div></body></html>");
         rt.execute_script(
             "font-ready",
@@ -5724,6 +5875,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_does_not_wait_for_analytics_interval() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "quiescent-long-interval",
@@ -5741,6 +5893,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fixed_duration_event_loop_yields_from_continuously_ready_tasks() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "fixed-duration-continuously-ready",
@@ -5777,6 +5930,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn short_observation_deadline_does_not_terminate_the_active_task() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "task-crossing-observation-deadline",
@@ -5807,6 +5961,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn adaptive_observation_deadline_does_not_terminate_the_active_task() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "adaptive-task-crossing-observation-deadline",
@@ -5838,6 +5993,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_yields_from_continuously_ready_non_visual_work() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "quiescent-continuously-ready",
@@ -5868,6 +6024,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_bounds_a_single_unyielding_callback_drain() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "quiescent-unyielding-task",
@@ -5902,6 +6059,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_retains_delayed_network_and_dom_update() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let client = std::sync::Arc::new(obscura_net::ObscuraHttpClient::with_full_options(
             std::sync::Arc::new(obscura_net::CookieJar::new()),
@@ -5969,6 +6127,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_allows_fetch_hydration_within_network_grace() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let (mut rt, accepted) =
             delayed_fetch_runtime(std::time::Duration::from_millis(700));
         rt.execute_script(
@@ -6005,6 +6164,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_bounds_a_hanging_page_request() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let (mut rt, accepted) = delayed_fetch_runtime(std::time::Duration::from_secs(3));
         rt.execute_script(
             "quiescent-hanging-fetch",
@@ -6033,6 +6193,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_gives_post_grace_dom_activity_a_quiet_window() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.state
             .borrow()
@@ -6068,6 +6229,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescence_ignores_another_pages_shared_client_request() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let client = std::sync::Arc::new(obscura_net::ObscuraHttpClient::with_full_options(
             std::sync::Arc::new(obscura_net::CookieJar::new()),
             None,
@@ -6091,6 +6253,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_retains_near_term_render_timeout() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "quiescent-render-timeout",
@@ -6111,6 +6274,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_bounds_continuous_visual_mutations() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "quiescent-animated-page",
@@ -6136,6 +6300,7 @@ mod tests {
 
     #[test]
     fn font_face_set_tracks_authored_and_script_created_faces() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><head><style>
                 @font-face {
@@ -6224,6 +6389,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn font_face_load_updates_status_set_readiness_and_matching() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "font-face-lifecycle",
@@ -6268,6 +6434,7 @@ mod tests {
 
     #[test]
     fn animation_frame_requires_a_callable_callback() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -6286,6 +6453,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn animation_frames_are_ordered_batches_with_rendering_timestamps() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "animation-frame-order",
@@ -6342,6 +6510,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn rendering_opportunity_orders_raf_resize_and_intersection_phases() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             "<html><body><div id='target' style='width:20px;height:20px'></div></body></html>",
         );
@@ -6370,6 +6539,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn raf_geometry_mutation_reaches_settled_intersection_before_next_frame() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             "<html><body style='margin:0'><div id='spacer' style='height:150px'></div><div id='target' style='height:20px'></div></body></html>",
         );
@@ -6416,6 +6586,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancel_animation_frame_removes_pending_and_current_batch_callbacks() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "animation-frame-cancel",
@@ -6442,6 +6613,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn self_requeueing_animation_frame_yields_to_timer_tasks() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "animation-frame-yield",
@@ -6482,6 +6654,7 @@ mod tests {
 
     #[test]
     fn test_document_url() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let url = rt.evaluate("document.URL").unwrap();
         assert_eq!(url, serde_json::json!("http://example.com/test"));
@@ -6489,6 +6662,7 @@ mod tests {
 
     #[test]
     fn test_query_selector() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><h1>Hello</h1><p>World</p></body></html>");
         let text = rt
             .evaluate("document.querySelector('h1').textContent")
@@ -6498,6 +6672,7 @@ mod tests {
 
     #[test]
     fn test_query_selector_all() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<ul><li>A</li><li>B</li><li>C</li></ul>");
         let count = rt
             .evaluate("document.querySelectorAll('li').length")
@@ -6507,6 +6682,7 @@ mod tests {
 
     #[test]
     fn css_supports_matches_capabilities_and_boolean_conditions() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -6551,6 +6727,7 @@ mod tests {
 
     #[test]
     fn test_get_element_by_id() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="test">Content</div>"#);
         let tag = rt
             .evaluate("document.getElementById('test').tagName")
@@ -6560,6 +6737,7 @@ mod tests {
 
     #[test]
     fn attributes_named_node_map_is_live() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="test" class="card" data-state="ready"></div>"#);
         let result = rt
             .evaluate(
@@ -6600,6 +6778,7 @@ mod tests {
 
     #[test]
     fn script_created_attribute_reads_stay_coherent_across_mutation_apis() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body></body></html>"#);
         let result = rt
             .evaluate(
@@ -6634,6 +6813,7 @@ mod tests {
 
     #[test]
     fn structural_cache_tracks_detach_reparent_and_rejected_mutations() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body></body></html>"#);
         let result = rt
             .evaluate(
@@ -6705,6 +6885,7 @@ mod tests {
 
     #[test]
     fn element_scroll_methods_update_scroll_offsets() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<div id="scroller" style="width:100px;height:100px;overflow:auto">
                    <div style="width:300px;height:300px"></div>
@@ -6741,6 +6922,7 @@ mod tests {
 
     #[test]
     fn document_fragment_get_element_by_id_searches_descendants() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="target">document</div>"#);
         let result = rt
             .evaluate(
@@ -6783,6 +6965,7 @@ mod tests {
     /// inside a subtree the page explicitly rejected.
     #[test]
     fn tree_walker_filter_reject_prunes_the_whole_subtree() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="root"><section><p>deep</p></section><a></a></div>"#);
         rt.run_page_init();
         let result = rt
@@ -6812,6 +6995,7 @@ mod tests {
     /// is accepted, not give up as soon as the first candidate is filtered out.
     #[test]
     fn previous_node_walks_reverse_document_order() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="root"><a><b></b></a><c></c></div>"#);
         rt.run_page_init();
         let result = rt
@@ -6843,6 +7027,7 @@ mod tests {
     /// at the root without ever returning it.
     #[test]
     fn previous_node_retraces_a_full_forward_walk() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<div id="root"><section><p>one</p><span></span></section><a><b></b></a></div>"#,
         );
@@ -6880,6 +7065,7 @@ mod tests {
     /// — the descent into a rejected node's last children must stop.
     #[test]
     fn previous_node_honours_filter_reject_subtree_pruning() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime(r#"<div id="root"><a></a><section><p>deep</p></section><c></c></div>"#);
         rt.run_page_init();
@@ -6914,6 +7100,7 @@ mod tests {
     /// returned it — escaping the walker's subtree entirely.
     #[test]
     fn tree_walker_parent_node_does_not_escape_above_root() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="root"><a></a></div>"#);
         let result = rt
             .evaluate(
@@ -6934,6 +7121,7 @@ mod tests {
     /// wrongly excluded it.
     #[test]
     fn tree_walker_parent_node_can_return_the_root() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="root"><a></a></div>"#);
         let result = rt
             .evaluate(
@@ -6953,6 +7141,7 @@ mod tests {
     /// accepted one, instead of stopping at the immediate parent.
     #[test]
     fn tree_walker_parent_node_climbs_past_skipped_ancestors() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime(r#"<div id="root"><main id="m"><section><a></a></section></main></div>"#);
         let result = rt
@@ -6980,6 +7169,7 @@ mod tests {
     /// leak TreeWalker's pruning into it.
     #[test]
     fn node_iterator_treats_filter_reject_as_skip() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="root"><section><p>deep</p></section><a></a></div>"#);
         rt.run_page_init();
         let result = rt
@@ -7010,6 +7200,7 @@ mod tests {
     /// dropped exactly the element the iterator was rooted at.
     #[test]
     fn node_iterator_yields_the_root_node_first() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="root"><a></a></div>"#);
         let result = rt
             .evaluate(
@@ -7030,6 +7221,7 @@ mod tests {
     /// members are not exposed on it.
     #[test]
     fn node_iterator_exposes_its_own_interface() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="root"><a></a></div>"#);
         let result = rt
             .evaluate(
@@ -7076,6 +7268,7 @@ mod tests {
     /// last node it yields going backwards.
     #[test]
     fn node_iterator_previous_node_retraces_the_walk() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="root"><a><b></b></a><c></c></div>"#);
         let result = rt
             .evaluate(
@@ -7104,6 +7297,7 @@ mod tests {
     /// back a fabricated empty fragment and the parsed markup was unreachable.
     #[test]
     fn template_content_exposes_parsed_markup() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<body><template id="t"><p class="row">a</p><p class="row">b</p></template></body>"#,
         );
@@ -7147,6 +7341,7 @@ mod tests {
     /// (so a <title>/<meta> assigned this way vanished).
     #[test]
     fn documentelement_inner_html_keeps_head_and_body() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><head></head><body></body></html>");
         let v = rt
             .evaluate(
@@ -7163,6 +7358,7 @@ mod tests {
     /// so the fix above must not change the common case.
     #[test]
     fn ordinary_element_inner_html_imports_content_directly() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><div id=\"d\"></div></body></html>");
         let v = rt
             .evaluate(
@@ -7178,6 +7374,7 @@ mod tests {
     /// inject templates.
     #[test]
     fn template_content_works_for_templates_added_via_inner_html() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<body><div id="host"></div></body>"#);
         let result = rt
             .evaluate(
@@ -7204,6 +7401,7 @@ mod tests {
     /// through innerHTML.
     #[test]
     fn template_content_round_trips_for_created_templates() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<body></body>"#);
         let result = rt
             .evaluate(
@@ -7231,6 +7429,7 @@ mod tests {
     /// template.
     #[test]
     fn template_contents_survive_serialization_and_clone() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime(r#"<body><template id="t"><li class="item">x</li></template></body>"#);
         let result = rt
@@ -7261,6 +7460,7 @@ mod tests {
     #[cfg(not(feature = "render"))]
     #[test]
     fn window_scroll_methods_move_the_page_offset() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="d"></div></body></html>"#);
         let result = rt
             .evaluate(
@@ -7290,6 +7490,7 @@ mod tests {
     #[cfg(not(feature = "render"))]
     #[test]
     fn window_scroll_offset_is_shared_with_the_scrolling_element() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="d"></div></body></html>"#);
         let result = rt
             .evaluate(
@@ -7312,6 +7513,7 @@ mod tests {
     #[cfg(not(feature = "render"))]
     #[tokio::test(flavor = "current_thread")]
     async fn window_scroll_fires_a_scroll_event() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="d"></div></body></html>"#);
         let result = rt
             .evaluate_for_cdp(
@@ -7335,6 +7537,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn rendered_window_scroll_clamps_and_geometry_is_viewport_relative() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="wide" style="width:600px;height:700px"></div>
@@ -7409,6 +7612,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn nested_scroll_metrics_geometry_pixels_and_relayout_share_one_state() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="outer" style="box-sizing:border-box;width:120px;height:100px;
@@ -7532,6 +7736,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn element_scroll_metrics_match_chromium_overflow_oracles() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
               <style>
@@ -7594,6 +7799,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn fractional_scroll_ranges_quantize_geometry_and_pixels_at_one_x() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
               <div id="low" style="width:100px;height:40px;overflow:auto;position:absolute;top:0">
@@ -7685,6 +7891,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn element_scroll_offsets_follow_chromium_box_and_dom_lifecycles() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
               <div id="first"><div id="scroller" style="width:100px;height:80px;overflow:auto">
@@ -7755,6 +7962,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn fixed_panels_scroll_locally_and_transformed_descendants_remain_supported() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0;height:1800px">
               <div id="modal" style="position:fixed;left:20px;top:20px;width:140px;height:120px;background:red">
@@ -7823,6 +8031,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn rendered_client_metrics_use_the_live_padding_box() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="tracker"
@@ -7919,6 +8128,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn rendered_cssom_rects_distinguish_no_box_from_zero_size_box() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="hidden" style="display:none;width:80px;height:40px"></div>
@@ -7984,6 +8194,7 @@ mod tests {
     #[cfg(not(feature = "render"))]
     #[test]
     fn non_render_cssom_rects_keep_compatibility_geometry() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="box"></div></body></html>"#);
         let result = rt
             .evaluate(
@@ -8008,6 +8219,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn root_scroll_sticky_geometry_matches_chromium_constraints() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div style="height:40px"></div>
@@ -8082,6 +8294,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn root_scroll_sticky_supports_the_inline_axis() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div style="box-sizing:border-box;margin-left:40px;width:500px;height:100px;padding:10px;border:4px solid">
@@ -8138,6 +8351,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn prepared_render_shares_resource_geometry_with_cssom_and_screenshots() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><head>
                 <base href="/assets/">
@@ -8258,6 +8472,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn missing_render_resource_preserves_prepared_layout_and_scroll() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0;height:240px">
                 <div style="height:240px;background:blue"></div>
@@ -8334,6 +8549,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn image_resource_arrival_retains_styles_and_rebuilds_intrinsic_geometry() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <img id="hero" src="http://example.test/late.png" style="display:block">
@@ -8410,6 +8626,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn fixed_image_resource_arrival_repaints_without_rebuilding_geometry() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <img id="hero" src="http://example.test/fixed.png"
@@ -8476,6 +8693,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn fixed_flex_image_resource_arrival_still_rebuilds_geometry() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><body><div style="display:flex">
                 <img id="hero" src="http://example.test/flex.png"
@@ -8508,6 +8726,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn fixed_css_content_image_arrival_still_rebuilds_intrinsic_geometry() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><body><img id="hero" src="fallback.png"
                 style="display:block;width:20px;height:10px;content:url('http://example.test/content.png')">
@@ -8539,6 +8758,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn document_region_capture_preserves_live_runtime_state_and_resource_cache() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0;height:260px">
                 <div style="height:120px;background:red"></div>
@@ -8653,6 +8873,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn script_registered_url_font_reaches_render_resource_collection() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let loads = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let loader_loads = std::sync::Arc::clone(&loads);
         let font = include_bytes!("../../obscura-render/assets/liberation-serif.ttf").to_vec();
@@ -8721,6 +8942,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn rendered_layout_cache_is_invalidated_by_style_mutations() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="box" style="height:300px;width:40px"></div>
@@ -8761,6 +8983,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn element_text_content_replacement_recomputes_empty_selector() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(parse_html(
             r#"<style>#x { width: 10px; height: 5px } #x:empty { width: 30px }</style>
@@ -8785,6 +9008,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn prepared_render_survives_detached_no_op_and_same_viewport_updates() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="box" class="box" style="height:30px;width:40px"></div>
@@ -8870,6 +9094,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn waapi_pause_seek_and_cancel_preserve_authored_inline_style() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><div id="box" style="opacity:.2;width:20px;height:20px"></div></body></html>"#,
         );
@@ -8907,6 +9132,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn waapi_zero_duration_finishes_asynchronously_and_fires_lifecycle() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="box" style="opacity:.1"></div>"#);
         rt.execute_script(
             "waapi-lifecycle",
@@ -8932,6 +9158,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn waapi_positive_infinite_iterations_remain_active() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="box" style="opacity:.1"></div>"#);
         rt.execute_script(
             "waapi-infinite",
@@ -8961,6 +9188,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn forward_animation_samples_retain_static_prepared_render() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(parse_html(
             r#"<html style="margin:0"><body style="margin:0">
@@ -9000,6 +9228,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn forward_active_animation_sample_updates_geometry_and_paint_from_retained_frame() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(parse_html(
             r#"<html style="margin:0"><head><style>
@@ -9046,6 +9275,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn forward_waapi_sample_updates_retained_style_and_paint() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="box" style="width:40px;height:40px;background:#1769aa"></div>
@@ -9115,6 +9345,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn waapi_cancel_retains_static_style_graph_and_restores_authored_style() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><div id="box" style="opacity:.25;width:20px;height:20px"></div></body></html>"#,
         );
@@ -9150,6 +9381,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn completed_animation_retains_forward_frame_but_backward_seek_rebuilds() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(parse_html(
             r#"<html style="margin:0"><head><style>
@@ -9208,6 +9440,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn unsupported_custom_property_animation_does_not_keep_render_damage_active() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(parse_html(
             r#"<html style="margin:0"><head><style>
@@ -9278,6 +9511,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn remove_and_reappend_restarts_animation_without_intermediate_flush() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = animation_epoch_runtime();
         rt.evaluate("var box=document.createElement('div');box.id='box';box.className='anim';document.body.appendChild(box)")
             .unwrap();
@@ -9300,6 +9534,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn scoped_animation_epochs_survive_later_unrelated_mutations_and_t0_capture() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = animation_epoch_runtime();
         rt.state.borrow_mut().animation_timeline_origin =
             std::time::Instant::now() - std::time::Duration::from_millis(100);
@@ -9332,6 +9567,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn timing_edits_preserve_identity_and_pause_holds_then_resumes() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = animation_epoch_runtime();
         rt.evaluate("var box=document.createElement('div');box.id='box';box.className='anim';document.body.appendChild(box)")
             .unwrap();
@@ -9364,6 +9600,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn cssom_geometry_samples_live_document_time() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = animation_epoch_runtime();
         rt.evaluate("var box=document.createElement('div');box.id='box';box.className='anim';document.body.appendChild(box)")
             .unwrap();
@@ -9384,6 +9621,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn fixed_animation_capture_is_invariant_after_geometry_flush() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let make_runtime = || {
             let mut rt = ObscuraJsRuntime::new();
             rt.set_dom(parse_html(
@@ -9432,6 +9670,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn cssom_animation_sample_is_frozen_within_one_javascript_task() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = animation_epoch_runtime();
         rt.evaluate("var box=document.createElement('div');box.id='box';box.className='anim';document.body.appendChild(box)")
             .unwrap();
@@ -9457,6 +9696,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn timer_callback_starts_a_fresh_lazy_animation_sample() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = animation_epoch_runtime();
         rt.execute_script(
             "timer-animation-sample",
@@ -9483,6 +9723,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn autocomplete_attribute_retains_prepared_render_until_geometry_flush() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><head><style>
                 input { display:block; width:40px; height:20px }
@@ -9535,6 +9776,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn namespaced_attribute_mutations_participate_in_id_and_render_invalidation() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0"><div id="box" class="box" style="height:30px;width:40px"></div></body></html>"#,
         );
@@ -9586,6 +9828,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn stylesheet_index_cache_reuses_sources_but_not_live_cascade_or_viewport() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><head><style id="sheet">
                 .a { width:40px; height:20px }
@@ -9668,6 +9911,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn connected_tree_mutations_queue_retained_styles_until_geometry_flush() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><head><style>
                 .item{display:block;width:40px;height:12px}
@@ -9760,6 +10004,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn root_overflow_clip_preserves_cssom_scroll_range() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0;height:100%;overflow:hidden">
                 <body style="margin:0;height:100%">
@@ -9797,6 +10042,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn rendered_window_scroll_events_require_actual_movement() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div style="height:1000px"></div>
@@ -9856,6 +10102,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn fingerprinted_screen_does_not_invent_a_device_scale_factor() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(parse_html("<html><body></body></html>"));
         rt.set_viewport(300.0, 200.0);
@@ -9879,6 +10126,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn resize_observer_reports_real_boxes_only_when_selected_size_changes() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="target" style="box-sizing:border-box;width:120px;height:80px;
@@ -9966,6 +10214,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn resize_observer_batches_unique_targets_into_one_native_layout_read() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="a" style="box-sizing:border-box;width:100px;height:30px;padding:2px 3px;border:1px solid"></div>
@@ -10067,6 +10316,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn resize_observer_selected_box_and_viewport_lifecycle_match_chromium() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="target" style="box-sizing:border-box;width:50vw;height:40px;
@@ -10122,6 +10372,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn scrolling_does_not_remeasure_resize_observer_targets() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0;height:1000px">
                 <div id="probe" style="width:40px;height:20px"></div>
@@ -10176,6 +10427,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn resize_observer_disconnect_is_reusable_and_inline_boxes_are_empty() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><body><div id="first" style="width:40px;height:20px"></div>
                 <span id="inline" style="padding:8px;border:2px solid">text</span>
@@ -10234,6 +10486,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn resize_observer_self_resize_is_depth_bounded_without_timer_spin() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><body><div id="target" style="width:40px;height:20px"></div>
             </body></html>"#,
@@ -10284,6 +10537,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_tracks_viewport_threshold_crossings() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div style="height:150px"></div>
@@ -10332,6 +10586,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_batches_unique_clip_graph_into_one_native_layout_read() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="root" style="width:200px;height:100px;overflow:hidden">
@@ -10434,6 +10689,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_delivers_document_batch_before_callback_posted_tasks() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><body><div id="first"></div><div id="second"></div></body></html>"#,
         );
@@ -10473,6 +10729,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_element_root_uses_live_padding_box_and_scroll() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="root" style="position:absolute;left:10px;top:20px;width:100px;
@@ -10539,6 +10796,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_clips_through_intermediate_overflow_ancestors() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="root" style="position:absolute;left:10px;top:20px;
@@ -10600,6 +10858,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_initial_geometry_waits_for_one_render_checkpoint() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><div id="first"></div><div id="second"></div></body></html>"#,
         );
@@ -10649,6 +10908,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_honors_root_margin_zero_area_and_no_fake_refires() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0;position:relative">
                 <div style="height:110px"></div>
@@ -10719,6 +10979,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_does_not_refire_while_target_stays_intersecting() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><body>
                 <div id="feed"></div>
@@ -10764,6 +11025,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_can_be_reused_after_disconnect() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="stale" style="height:10px"></div>
@@ -10816,6 +11078,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_recomputes_after_style_mutation_and_resize() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div id="spacer" style="height:150px"></div>
@@ -10862,6 +11125,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn intersection_observer_recomputes_after_root_scroll() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div style="height:150px"></div>
@@ -10899,6 +11163,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn scroll_into_view_aligns_the_root_viewport_and_clamps() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div style="height:300px"></div>
@@ -10954,6 +11219,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn scroll_into_view_emits_events_only_when_the_root_moves() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0">
                 <div style="height:300px"></div>
@@ -11011,6 +11277,7 @@ mod tests {
     /// firstChild()/lastChild() must descend into them. FILTER_REJECT must not.
     #[test]
     fn tree_walker_child_movers_descend_on_skip_but_not_on_reject() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="root"><section><a></a><b></b></section></div>"#);
         let result = rt
             .evaluate(
@@ -11042,6 +11309,7 @@ mod tests {
     /// sibling's subtree rather than stepping straight over it.
     #[test]
     fn tree_walker_sibling_movers_descend_into_skipped_siblings() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<div id="root"><p id="start"></p><section><a></a></section><q></q></div>"#,
         );
@@ -11074,6 +11342,7 @@ mod tests {
     /// Issue #469: the backward sibling mover descends to *last* children.
     #[test]
     fn tree_walker_previous_sibling_descends_to_last_child() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<div id="root"><section><a></a><b></b></section><p id="start"></p></div>"#,
         );
@@ -11100,6 +11369,7 @@ mod tests {
 
     #[test]
     fn append_child_flattens_document_fragment() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<main id="host"></main>"#);
         let result = rt
             .evaluate(
@@ -11134,6 +11404,7 @@ mod tests {
 
     #[test]
     fn insert_before_flattens_document_fragment_in_order() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<main id="host"><article id="last"></article></main>"#);
         let result = rt
             .evaluate(
@@ -11167,6 +11438,7 @@ mod tests {
 
     #[test]
     fn replace_child_flattens_document_fragment_and_removes_old_child() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<main id="host"><article id="old"></article><article id="tail"></article></main>"#,
         );
@@ -11203,6 +11475,7 @@ mod tests {
 
     #[test]
     fn test_inner_html() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="x"><p>Hello</p></div>"#);
         let html = rt
             .evaluate("document.getElementById('x').innerHTML")
@@ -11212,6 +11485,7 @@ mod tests {
 
     #[test]
     fn template_inner_html_preserves_table_fragments() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -11233,6 +11507,7 @@ mod tests {
 
     #[test]
     fn document_exposes_parent_node_element_children_api() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><head></head><body></body></html>");
         let result = rt
             .evaluate(
@@ -11246,6 +11521,7 @@ mod tests {
 
     #[test]
     fn atob_decodes_large_payload_without_argument_stack_overflow() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         // 60k four-character groups decode to 180k bytes, comfortably above
         // V8's maximum argument count for a single fromCharCode(...bytes).
@@ -11256,6 +11532,7 @@ mod tests {
 
     #[test]
     fn navigation_api_updates_current_entry_state() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -11282,6 +11559,7 @@ mod tests {
 
     #[test]
     fn inline_stylesheet_cssom_lists_and_rules_are_live_same_objects() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><head>
                 <style id="first">.one { color:red } .two { width:20px }</style>
@@ -11410,6 +11688,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn stylesheet_cssom_mutations_update_the_live_cascade() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html style="margin:0"><head>
                 <style>#box { width:11px; height:10px }</style>
@@ -11474,6 +11753,7 @@ mod tests {
 
     #[test]
     fn adopted_stylesheets_materialize_into_the_document() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime("<html><head></head><body><div class=\"card\"></div></body></html>");
         let result = rt
@@ -11516,6 +11796,7 @@ mod tests {
 
     #[test]
     fn shadow_stylesheet_lists_and_adoption_are_live_across_roots() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             "<html><head></head><body><div id='one'></div><div id='two'></div></body></html>",
         );
@@ -11606,6 +11887,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn shadow_adopted_stylesheets_apply_and_sync_the_live_cascade() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html style="margin:0"><head>
                 <style>.target { width:11px; height:10px }</style>
@@ -11671,6 +11953,7 @@ mod tests {
 
     #[test]
     fn unavailable_webgl_context_does_not_claim_success() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><canvas></canvas></body></html>");
         let result = rt
             .evaluate(
@@ -11702,6 +11985,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn canvas_2d_live_backing_paints_immediately_with_scaling_clips_and_effects() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html style="margin:0"><body style="margin:0;width:64px;height:40px;background:#0000ff">
                 <div style="position:absolute;left:4px;top:4px;width:18px;height:14px;overflow:hidden">
@@ -11861,6 +12145,7 @@ mod tests {
 
     #[test]
     fn test_script_execution() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<ul><li>A</li><li>B</li></ul>");
         rt.execute_script(
             "test",
@@ -11878,6 +12163,7 @@ mod tests {
 
     #[test]
     fn page_var_declarations_do_not_collide_with_dom_interfaces() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
 
         rt.execute_script(
@@ -11903,6 +12189,7 @@ mod tests {
 
     #[test]
     fn dynamic_script_status_bridge_is_hidden_and_idle() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         assert!(!rt.has_pending_dynamic_scripts());
         assert!(!rt.has_pending_load_delaying_scripts());
@@ -11954,6 +12241,7 @@ mod tests {
     /// crashed; that cascade should never happen.
     #[test]
     fn script_typeerror_does_not_poison_subsequent_execution() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><p id=hit>BODY_TEXT</p></body></html>");
 
         // 1. First script throws the same flavor of error offside.js produced
@@ -11986,6 +12274,7 @@ mod tests {
     /// thrown error is reported but the next script still runs.
     #[test]
     fn thrown_error_in_one_script_does_not_stop_later_scripts() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script("s1", "globalThis.__ran1 = true;")
             .unwrap();
@@ -12014,6 +12303,7 @@ mod tests {
     /// semicolon.
     #[test]
     fn style_and_dataset_support_in_operator_and_keys() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -12053,6 +12343,7 @@ mod tests {
 
     #[test]
     fn dom_string_map_is_exposed_and_backs_dataset() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="x" data-foo="bar"></div>"#);
         let result = rt
             .evaluate(
@@ -12096,6 +12387,7 @@ mod tests {
 
     #[test]
     fn style_declaration_reflects_and_removes_parsed_attributes() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             "<html><body><div id='icon' style='font-size: 0px; color: red'></div></body></html>",
         );
@@ -12123,6 +12415,7 @@ mod tests {
 
     #[test]
     fn select_add_and_option_text_update_the_live_dom() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><select id='language'></select></body></html>");
         let result = rt
             .evaluate(
@@ -12160,6 +12453,7 @@ mod tests {
     /// must scope to the receiver's subtree, not the whole document.
     #[test]
     fn element_query_selector_is_scoped_to_subtree() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<div id="a"><span class="x">in a</span></div><div id="b"><span class="x">in b</span></div>"#,
         );
@@ -12182,6 +12476,7 @@ mod tests {
 
     #[test]
     fn document_evaluate_exposes_basic_xpath_result() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("");
 
         let exposed = rt
@@ -12195,6 +12490,7 @@ mod tests {
     /// `document.forms` and crashes when it's empty for pages that have forms.
     #[test]
     fn document_forms_images_links_are_live() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime(r#"<form></form><form></form><img><a href="x">l</a><a>no-href</a>"#);
         assert_eq!(
@@ -12249,6 +12545,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn parser_images_load_concurrently_without_blocking_the_event_loop() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -12369,6 +12666,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn image_lifecycle_cache_is_separated_by_cors_credentials_profile() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -12513,6 +12811,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn parser_image_data_src_mutation_does_not_restart_lifecycle() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = requests.clone();
         let png = two_by_three_png();
@@ -12570,6 +12869,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn parser_image_data_src_is_inert_until_script_assigns_src() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = requests.clone();
         let png = two_by_three_png();
@@ -12632,6 +12932,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn parser_image_lifecycle_uses_shared_render_resource() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let loader_calls = calls.clone();
         let png = two_by_three_png();
@@ -12703,6 +13004,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn parser_image_failure_completes_and_rejects_decode() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let loader_calls = calls.clone();
         let mut rt = parser_image_runtime(
@@ -12742,6 +13044,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn parser_image_first_getter_observes_prepare_seeded_cache_synchronously() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let loader_calls = calls.clone();
         let png = two_by_three_png();
@@ -12782,6 +13085,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn parser_image_fallback_invalidates_only_new_intrinsic_geometry() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let loader_calls = calls.clone();
         let png = two_by_three_png();
@@ -12893,6 +13197,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn stable_cached_image_getters_do_not_queue_resize_geometry_work() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let png = two_by_three_png();
         let mut rt = parser_image_runtime(
             r#"<img id="cached" src="cached.png">
@@ -12960,6 +13265,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn parser_image_source_replacement_cancels_queued_completion() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = requests.clone();
         let first = two_by_three_png();
@@ -13013,6 +13319,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn responsive_picture_lifecycle_tracks_viewport_density_and_source_media() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = requests.clone();
         let png = two_by_three_png();
@@ -13125,6 +13432,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn responsive_srcset_sizes_uses_renderer_selected_current_src() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = requests.clone();
         let png = two_by_three_png();
@@ -13193,6 +13501,7 @@ mod tests {
     /// frameworks that probe form field collections work.
     #[test]
     fn html_form_element_exposes_elements_collection() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<form id="f"><input name=a><input name=b><textarea></textarea></form>"#,
         );
@@ -13210,6 +13519,7 @@ mod tests {
     /// start, not silently no-op.
     #[test]
     fn element_prepend_inserts_at_start() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="c"><span>existing</span></div>"#);
         rt.evaluate(
             r#"
@@ -13234,6 +13544,7 @@ mod tests {
     /// Framework diff algorithms rely on this.
     #[test]
     fn is_equal_node_does_structural_compare() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -13254,6 +13565,7 @@ mod tests {
     /// `insertBefore` actually inserts.
     #[test]
     fn insert_before_inserts_node_at_correct_position() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime(r#"<div id="p"><span id="b">b</span><span id="c">c</span></div>"#);
         let order = rt
@@ -13272,6 +13584,7 @@ mod tests {
 
     #[test]
     fn test_console_log() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script("test", "console.log('Hello from V8!')")
             .unwrap();
@@ -13279,6 +13592,7 @@ mod tests {
 
     #[test]
     fn test_location() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let href = rt.evaluate("location.href").unwrap();
         assert_eq!(href, serde_json::json!("http://example.com/test"));
@@ -13286,6 +13600,7 @@ mod tests {
 
     #[test]
     fn test_button_click_dispatches_listener() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<button id="go">Go</button>"#);
         let result = rt
             .evaluate(
@@ -13302,6 +13617,7 @@ mod tests {
 
     #[test]
     fn test_label_click_activates_its_labeled_control() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<label id="explicit" for="a">a</label><input type="checkbox" id="a">
                <label id="implicit">b <input type="checkbox" id="b"></label>"#,
@@ -13320,6 +13636,7 @@ mod tests {
 
     #[test]
     fn test_label_click_honors_the_association_rules() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // A present `for` associates by id alone: an empty value associates
         // nothing and must not fall back to the nested control, and a dangling
         // id activates nothing. A disabled control has no activation behavior.
@@ -13348,6 +13665,7 @@ mod tests {
 
     #[test]
     fn test_label_activation_does_not_double_fire_or_recurse() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // Clicking the control inside its own label toggles once, and a click
         // handler that clicks that label back cannot re-enter the forwarding.
         let mut rt = setup_runtime(
@@ -13374,6 +13692,7 @@ mod tests {
 
     #[test]
     fn test_click_respects_disabled_controls_and_interactive_content() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // A disabled control has no activation behaviour, whether it is clicked
         // directly, reached through its label, or disabled by an ancestor
         // fieldset. Interactive content inside a label swallows the label's
@@ -13402,6 +13721,7 @@ mod tests {
 
     #[test]
     fn test_checkbox_indeterminate_is_idl_only_and_cleared_by_activation() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // `indeterminate` has no content attribute, so it exists only if the
         // prototype defines it -- `'indeterminate' in el` is the check that
         // fails when it is missing. Activation clears it as well as toggling
@@ -13444,6 +13764,7 @@ mod tests {
 
     #[test]
     fn test_disabled_only_applies_to_disableable_elements() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // A `disabled` attribute is meaningless on anything that cannot be
         // disabled, and only listed form controls inherit it from a fieldset.
         // Component libraries do put `disabled` on plain <div>s, so treating
@@ -13472,6 +13793,7 @@ mod tests {
 
     #[test]
     fn test_label_forwarding_uses_interactive_content_not_labelable() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // meter, output and progress are labelable but not interactive, so a
         // click on one still activates the label. An <a> counts only with href.
         let mut rt = setup_runtime(
@@ -13498,6 +13820,7 @@ mod tests {
 
     #[test]
     fn test_radio_activation_moves_the_checked_peer_and_reverts_on_cancel() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<form><label id="pick" for="b">b</label>
                  <input type="radio" name="g" id="a" checked>
@@ -13532,6 +13855,7 @@ mod tests {
 
     #[test]
     fn test_disabled_fieldset_exemption_is_the_first_legend_child_only() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // Every disabled fieldset ancestor counts, and only descendants of that
         // fieldset's first <legend> child escape it. A legend wrapped in a div
         // is not the fieldset's legend, a second legend does not exempt, and an
@@ -13565,6 +13889,7 @@ mod tests {
 
     #[test]
     fn test_label_click_runs_checkbox_pre_click_activation() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // The control flips before the click event dispatches, so listeners
         // observe the new state, `input` and `change` follow, and a cancelled
         // event restores the old state.
@@ -13597,6 +13922,7 @@ mod tests {
 
     #[test]
     fn test_dispatch_mouse_event_runs_listener() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<button id="go">Go</button>"#);
         let result = rt
             .evaluate(
@@ -13614,6 +13940,7 @@ mod tests {
 
     #[test]
     fn test_location_href_assignment_updates_navigation_state() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let href = rt
             .evaluate("const next = '/next'; location.href = next; return location.href;")
@@ -13631,6 +13958,7 @@ mod tests {
 
     #[test]
     fn test_location_navigation_coerces_url_objects() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let hrefs = rt
             .evaluate(
@@ -13664,6 +13992,7 @@ mod tests {
 
     #[test]
     fn test_submit_button_click_handler_can_prevent_default_and_navigate() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime(r#"<form><button type="submit" id="submit">Submit</button></form>"#);
         let href = rt
@@ -13692,6 +14021,7 @@ mod tests {
 
     #[test]
     fn test_navigator() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let ua = rt.evaluate("navigator.userAgent").unwrap();
         assert!(
@@ -13709,6 +14039,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_call_function_on_no_args() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><head><title>Test</title></head><body></body></html>");
         let result = rt
             .call_function_on("() => document.title", None, &[], true)
@@ -13719,6 +14050,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_call_function_on_with_args() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let args = vec![
             serde_json::json!({"value": 10}),
@@ -13733,6 +14065,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_call_function_on_with_string_args() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let args = vec![
             serde_json::json!({"value": "hello"}),
@@ -13747,6 +14080,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_call_function_on_with_object_args() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let args = vec![serde_json::json!({"value": {"name": "test", "count": 5}})];
         let result = rt
@@ -13758,6 +14092,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_call_function_on_return_object() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .call_function_on("() => ({a: 1, b: 2})", None, &[], true)
@@ -13768,6 +14103,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_call_function_on_object_ref_preserves_methods() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .call_function_on(
@@ -13794,6 +14130,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_evaluate_for_cdp_detects_node() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><h1>Hello</h1></body></html>");
         let result = rt
             .evaluate_for_cdp("document.querySelector('h1')", false, false)
@@ -13806,6 +14143,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_evaluate_for_cdp_detects_document() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt.evaluate_for_cdp("document", false, false).await.unwrap();
         assert_eq!(result.subtype.as_deref(), Some("node"));
@@ -13814,6 +14152,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_evaluate_for_cdp_awaits_resolved_promise() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate_for_cdp("Promise.resolve(42)", true, true)
@@ -13824,6 +14163,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_evaluate_for_cdp_awaits_timer_promise() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate_for_cdp(
@@ -13838,6 +14178,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_evaluate_for_cdp_can_await_beyond_legacy_five_second_cap() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let started = std::time::Instant::now();
         let result = rt
@@ -13858,6 +14199,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_call_function_on_for_cdp_reports_unsettled_promise_timeout() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let error = rt
             .call_function_on_for_cdp_with_timeout(
@@ -13878,6 +14220,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_evaluate_for_cdp_awaits_async_function() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate_for_cdp("(async () => 'async-ok')()", true, true)
@@ -13888,6 +14231,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_evaluate_for_cdp_reports_promise_rejection() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let err = rt
             .evaluate_for_cdp("Promise.reject(new Error('boom'))", true, true)
@@ -13898,6 +14242,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_call_function_on_dom_interaction() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="items"><span>A</span><span>B</span></div>"#);
         let args = vec![serde_json::json!({"value": "span"})];
         let result = rt
@@ -13914,6 +14259,7 @@ mod tests {
 
     #[test]
     fn test_inner_html_setter() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="target"><p>Old</p></div>"#);
         rt.execute_script(
             "test",
@@ -13946,6 +14292,7 @@ mod tests {
 
     #[test]
     fn test_inner_html_with_nested() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="root"></div>"#);
         rt.execute_script(
             "test",
@@ -13970,8 +14317,69 @@ mod tests {
         assert_eq!(text, serde_json::json!("A"));
     }
 
+    #[cfg(feature = "render")]
+    #[test]
+    fn checked_state_activity_and_document_replacement() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
+        let html = r#"<html><body><input id="field" type="checkbox" checked></body></html>"#;
+        let mut rt = setup_runtime(html);
+        let node = rt.state.borrow().dom.as_ref().unwrap().get_element_by_id("field").unwrap();
+        let activity = rt.state.borrow().activity_generation;
+        rt.evaluate("field.checked=true").unwrap();
+        assert_eq!(rt.state.borrow().activity_generation, activity, "same painted state must be quiet");
+        rt.evaluate("field.checked=false").unwrap();
+        assert_eq!(rt.state.borrow().activity_generation, activity.wrapping_add(1));
+        rt.evaluate("field.checked=false").unwrap();
+        assert_eq!(rt.state.borrow().activity_generation, activity.wrapping_add(1), "repeated state must be quiet");
+        assert_eq!(rt.state.borrow().render_resources.form_checked(node), Some(false));
+        rt.set_dom(parse_html(html));
+        let replacement = rt.state.borrow().dom.as_ref().unwrap().get_element_by_id("field").unwrap();
+        assert_eq!(node, replacement);
+        assert_eq!(rt.state.borrow().render_resources.form_checked(replacement), None);
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn document_replacement_clears_native_form_values() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
+        let html = r#"<html><body><input id="field"></body></html>"#;
+        let mut rt = setup_runtime(html);
+        rt.evaluate("document.getElementById('field').value='secret'").unwrap();
+        let node = rt.state.borrow().dom.as_ref().unwrap().get_element_by_id("field").unwrap();
+        assert_eq!(rt.state.borrow().render_resources.form_value(node), Some("secret"));
+        rt.set_dom(parse_html(html));
+        let replacement = rt.state.borrow().dom.as_ref().unwrap().get_element_by_id("field").unwrap();
+        assert_eq!(node, replacement);
+        assert_eq!(rt.state.borrow().render_resources.form_value(replacement), None);
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn native_form_copy_is_bounded_and_page_value_is_not() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
+        let mut rt = setup_runtime(r#"<input id="field">"#);
+        let length = rt.evaluate("(()=>{field.value='x'.repeat(1000000);return field.value.length})()").unwrap();
+        assert_eq!(length.as_f64(), Some(1_000_000.0));
+        let state = rt.state.borrow(); let node = state.dom.as_ref().unwrap().get_element_by_id("field").unwrap();
+        assert_eq!(state.render_resources.form_value(node).unwrap().chars().count(), 4096);
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn invalid_form_op_does_not_store_native_state() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
+        let mut rt = setup_runtime(r#"<input id="field">"#);
+        let result = rt.evaluate("(()=>{let cycle={};cycle.self=cycle;Deno.core.ops.op_form_paint_value(field._nid,cycle,false,0);Deno.core.ops.op_form_paint_value(document.body._nid,'x',false,0);Deno.core.ops.op_form_paint_value(4294967295,'x',false,0);return 42})()").unwrap();
+        assert_eq!(result.as_f64(), Some(42.0));
+        let state = rt.state.borrow(); let dom = state.dom.as_ref().unwrap();
+        assert_eq!(state.render_resources.form_value(dom.get_element_by_id("field").unwrap()), None);
+        assert_eq!(state.render_resources.form_value(dom.query_selector("body").unwrap().unwrap()), None);
+        assert_eq!(state.render_resources.form_value(obscura_dom::NodeId::new(u32::MAX)), None);
+    }
+
     #[test]
     fn test_input_value() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<form><input id="name" type="text" value="initial"><textarea id="bio">old text</textarea></form>"#,
         );
@@ -13994,6 +14402,7 @@ mod tests {
 
     #[test]
     fn test_sequential_runtime_swap() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt1 = setup_runtime("<html><body><h1>Page1</h1></body></html>");
         let title1 = rt1
             .evaluate("document.querySelector('h1').textContent")
@@ -14025,6 +14434,7 @@ mod tests {
 
     #[test]
     fn test_checkbox_checked() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<input id="cb" type="checkbox" checked>"#);
         let checked = rt
             .evaluate("document.getElementById('cb').checked")
@@ -14046,6 +14456,7 @@ mod tests {
     // keeps the tracker in sync and suppresses onChange.
     #[test]
     fn set_field_value_bypasses_instance_value_wrapper() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<input id="i">"#);
         let result = rt
             .evaluate(
@@ -14084,6 +14495,7 @@ mod tests {
     // fires. These must be present on document and Element.prototype too.
     #[test]
     fn global_event_handlers_present_on_document_and_element() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<div></div>");
         let result = rt
             .evaluate(
@@ -14106,6 +14518,7 @@ mod tests {
 
     #[test]
     fn test_matches_and_closest() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<div class="outer"><div class="inner"><span id="target">Hi</span></div></div>"#,
         );
@@ -14125,6 +14538,7 @@ mod tests {
 
     #[test]
     fn shallow_element_clone_preserves_interface_attributes_and_isolation() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<section id="src" class="source" data-token="original"><span>child</span></section>"#,
         );
@@ -14167,6 +14581,7 @@ mod tests {
 
     #[test]
     fn deep_document_element_clone_stays_an_independent_html_element() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html lang="en" data-root="original"><head><title>Clone</title></head><body><main id="app" data-state="source"><p class="item">original text</p></main></body></html>"#,
         );
@@ -14228,6 +14643,7 @@ mod tests {
 
     #[test]
     fn test_evaluate_multistatement() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt.evaluate("var x = 5; var y = 10; return x + y;").unwrap();
         assert_eq!(result.as_f64().unwrap() as i64, 15);
@@ -14235,6 +14651,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_object_ref_as_argument() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let obj = rt
             .call_function_on("() => ({ x: 42 })", None, &[], false)
@@ -14266,6 +14683,7 @@ mod tests {
 
     #[test]
     fn test_document_cookie_reads_http_cookies() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
         let url = url::Url::parse("http://example.com/test").unwrap();
         jar.set_cookie("session=abc123; Path=/", &url);
@@ -14286,6 +14704,7 @@ mod tests {
 
     #[test]
     fn test_document_cookie_excludes_httponly() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
         let url = url::Url::parse("http://example.com/test").unwrap();
         jar.set_cookie("visible=yes; Path=/", &url);
@@ -14306,6 +14725,7 @@ mod tests {
 
     #[test]
     fn test_document_cookie_setter_stores_in_jar() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
         rt.evaluate("document.cookie = 'foo=bar; Path=/'").unwrap();
         let url = url::Url::parse("http://example.com/test").unwrap();
@@ -14321,6 +14741,7 @@ mod tests {
 
     #[test]
     fn test_document_cookie_delete_via_max_age() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
         let url = url::Url::parse("http://example.com/test").unwrap();
         rt.evaluate("document.cookie = 'temp=val; Path=/'").unwrap();
@@ -14342,6 +14763,7 @@ mod tests {
 
     #[test]
     fn test_document_cookie_js_and_http_merge() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
         let url = url::Url::parse("http://example.com/test").unwrap();
         jar.set_cookie("server_sid=xyz; Path=/", &url);
@@ -14363,6 +14785,7 @@ mod tests {
 
     #[test]
     fn test_document_cookie_empty_when_no_cookies() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
         let result = rt.evaluate("document.cookie").unwrap();
         assert_eq!(result.as_str().unwrap(), "");
@@ -14370,6 +14793,7 @@ mod tests {
 
     #[test]
     fn test_document_cookie_no_jar_returns_empty() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt.evaluate("document.cookie").unwrap();
         assert_eq!(result.as_str().unwrap(), "");
@@ -14377,6 +14801,7 @@ mod tests {
 
     #[test]
     fn test_document_write_appends_to_body() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><p>Existing</p></body></html>");
         rt.evaluate("document.write('<div>Added</div>')").unwrap();
         let html = rt.evaluate("document.body.innerHTML").unwrap();
@@ -14395,6 +14820,7 @@ mod tests {
 
     #[test]
     fn test_document_writeln() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.evaluate("document.writeln('Hello')").unwrap();
         let html = rt.evaluate("document.body.innerHTML").unwrap();
@@ -14403,6 +14829,7 @@ mod tests {
 
     #[test]
     fn test_document_write_multiple_args() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.evaluate("document.write('Hello', ' ', 'World')")
             .unwrap();
@@ -14412,6 +14839,7 @@ mod tests {
 
     #[test]
     fn test_document_open_clears_body() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><p>Old content</p></body></html>");
         rt.evaluate("document.open()").unwrap();
         let html = rt.evaluate("document.body.innerHTML").unwrap();
@@ -14420,6 +14848,7 @@ mod tests {
 
     #[test]
     fn test_document_write_html_elements() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.evaluate(r#"document.write('<h1 id="title">Test</h1><p>Para</p>')"#)
             .unwrap();
@@ -14435,6 +14864,7 @@ mod tests {
 
     #[test]
     fn test_url_relative_resolution() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate("new URL('data.json', 'http://example.com/path/page.html').href")
@@ -14494,6 +14924,7 @@ mod tests {
 
     #[test]
     fn base_href_governs_dom_url_reflection() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime_at_deep_url(BASE_HREF_PAGE);
 
         // One evaluate, one assert: a bundle of assert_eq! aborts at the first failure and
@@ -14521,6 +14952,7 @@ mod tests {
 
     #[test]
     fn a_relative_location_assignment_follows_the_base() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // _resolveUrl serves location.href=, assign, replace and window.location=. Of the six
         // call sites it has the largest external effect, so it gets its own test.
         let mut rt = setup_runtime_at_deep_url(BASE_HREF_PAGE);
@@ -14532,6 +14964,7 @@ mod tests {
 
     #[test]
     fn without_base_href_resolution_stays_on_the_document_url() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime_at_deep_url(
             r#"<html><head></head><body>
                 <a id="link" href="data/x.json"></a>
@@ -14565,6 +14998,7 @@ mod tests {
 
     #[test]
     fn base_element_href_reflects_the_resolved_url() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // Resolved against the fallback base URL, i.e. the document URL and not /app/.
         let mut rt = setup_runtime_at_deep_url(BASE_HREF_PAGE);
         let href = rt.evaluate("document.querySelector('base').href").unwrap();
@@ -14581,6 +15015,7 @@ mod tests {
 
     #[test]
     fn the_first_base_with_an_href_wins() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // Tree order, and a <base> without href does not count.
         let mut rt = setup_runtime_at_deep_url(
             r#"<html><head><base><base href="/a/"><base href="/b/"></head><body>
@@ -14595,6 +15030,7 @@ mod tests {
 
     #[test]
     fn an_empty_base_href_resolves_to_the_document_url() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime_at_deep_url(
             r#"<html><head><base href=""></head><body>
                 <a id="link" href="x.json"></a>
@@ -14608,6 +15044,7 @@ mod tests {
 
     #[test]
     fn a_cross_origin_base_moves_the_target_but_not_the_page_origin() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime_at_deep_url(
             r#"<html><head><base href="https://cdn.example.net/v2/"></head><body>
                 <a id="link" href="x.json"></a>
@@ -14627,6 +15064,7 @@ mod tests {
 
     #[test]
     fn base_href_rejects_a_data_url_base() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // https://html.spec.whatwg.org/multipage/semantics.html#set-the-frozen-base-url
         // Accepting it would make every later relative resolution fail instead of falling back.
         let mut rt = setup_runtime_at_deep_url(
@@ -14646,6 +15084,7 @@ mod tests {
 
     #[test]
     fn base_resolution_follows_the_url_set_by_push_state() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // pushState changes the document URL, and without <base> that very URL is the base.
         let mut rt = setup_runtime_at_deep_url(
             r#"<html><head></head><body><a id="link" href="x.json"></a></body></html>"#,
@@ -14660,6 +15099,7 @@ mod tests {
 
     #[test]
     fn a_relative_base_href_resolves_against_the_push_state_url() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime_at_deep_url(
             r#"<html><head><base href="assets/"></head><body>
                 <a id="link" href="x.json"></a>
@@ -14678,6 +15118,7 @@ mod tests {
     /// The bound is deliberately loose: it should catch the regression, not watch the allocator.
     #[test]
     fn anchor_href_reads_do_not_scale_with_document_size() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut body = String::from(r#"<html><head></head><body><a id="link" href="x.json"></a>"#);
         for i in 0..4000 {
             body.push_str(&format!("<div id=\"n{i}\"><span>text</span></div>"));
@@ -14704,6 +15145,7 @@ mod tests {
 
     #[test]
     fn the_base_memo_still_sees_a_base_element_added_later() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime_at_deep_url(
             r#"<html><head></head><body><a id="link" href="x.json"></a></body></html>"#,
         );
@@ -14729,6 +15171,7 @@ mod tests {
 
     #[test]
     fn the_base_memo_notices_a_changed_href_attribute() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime_at_deep_url(BASE_HREF_PAGE);
         let before = rt
             .evaluate("document.getElementById('link').href")
@@ -14746,6 +15189,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn base_href_governs_fetch_and_xhr_targets() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime_at_deep_url(BASE_HREF_PAGE);
         let result = rt
             .call_function_on_for_cdp(
@@ -14787,6 +15231,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_fetch_url_input_decodes_binary_body_base64() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .call_function_on_for_cdp(
@@ -14828,6 +15273,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_and_xhr_forward_browser_credentials_modes() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .call_function_on_for_cdp(
@@ -14903,6 +15349,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_preserves_binary_body_sources_at_the_op_boundary() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .call_function_on_for_cdp(
@@ -14997,6 +15444,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_form_urlencoded_and_xhr_bodies_reach_the_op_as_bytes() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .call_function_on_for_cdp(
@@ -15207,6 +15655,7 @@ mod tests {
     /// WPT covers the same pair in `fetch/api/redirect/redirect-count.any.js`.
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_follows_the_twentieth_redirect() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let _test_enforce = crate::test_gate_hooks::Guard::local_only();
         let mut rt = redirect_chain_runtime(21);
         let result = rt
@@ -15227,6 +15676,7 @@ mod tests {
     /// fail. `fetch` reports a rejected result as a `TypeError`.
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_rejects_the_twenty_first_redirect() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let _test_enforce = crate::test_gate_hooks::Guard::local_only();
         let mut rt = redirect_chain_runtime(21);
         let result = rt
@@ -15253,6 +15703,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dynamic_linked_stylesheet_enters_the_live_dom_with_imports_rebased() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime("<html><head></head><body><div class=\"card\"></div></body></html>");
         let result = rt
@@ -15339,6 +15790,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn unsuccessful_dynamic_script_response_fires_error_without_evaluating_body() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><head></head><body></body></html>");
         let result = rt
             .call_function_on_for_cdp(
@@ -15385,6 +15837,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dynamic_classic_scripts_are_async_by_default_but_honor_async_false_order() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><head></head><body></body></html>");
         let result = rt
             .call_function_on_for_cdp(
@@ -15443,6 +15896,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_response_array_buffer_preserves_typed_array_view() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .call_function_on_for_cdp(
@@ -15467,6 +15921,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_wasm_instantiate_streaming_uses_response_array_buffer() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .call_function_on_for_cdp(
@@ -15491,6 +15946,7 @@ mod tests {
 
     #[test]
     fn test_text_decoder_respects_typed_array_view() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate("new TextDecoder().decode(new Uint8Array([65, 66, 67]).subarray(1, 2))")
@@ -15500,6 +15956,7 @@ mod tests {
 
     #[test]
     fn test_document_doctype() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<!DOCTYPE html><html><body></body></html>");
         let result = rt.evaluate("document.doctype !== null").unwrap();
         assert_eq!(result, serde_json::json!(true));
@@ -15513,6 +15970,7 @@ mod tests {
 
     #[test]
     fn test_document_doctype_null_when_missing() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt.evaluate("document.doctype === null").unwrap();
         assert_eq!(result, serde_json::json!(true));
@@ -15520,6 +15978,7 @@ mod tests {
 
     #[test]
     fn test_xml_serializer_doctype() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<!DOCTYPE html><html><body></body></html>");
         let result = rt
             .evaluate("new XMLSerializer().serializeToString(document.doctype)")
@@ -15529,6 +15988,7 @@ mod tests {
 
     #[test]
     fn test_xml_serializer_element() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><div id="x">Hello</div></body></html>"#);
         let result = rt
             .evaluate("new XMLSerializer().serializeToString(document.getElementById('x'))")
@@ -15540,6 +16000,7 @@ mod tests {
 
     #[test]
     fn test_create_event_custom_event_has_init_method() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let kind = rt
             .evaluate("typeof document.createEvent('CustomEvent').initCustomEvent")
@@ -15549,6 +16010,7 @@ mod tests {
 
     #[test]
     fn test_init_custom_event_sets_fields() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "test",
@@ -15570,6 +16032,7 @@ mod tests {
 
     #[test]
     fn test_create_event_returns_correct_class() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let cust = rt
             .evaluate("document.createEvent('CustomEvent') instanceof CustomEvent")
@@ -15599,6 +16062,7 @@ mod tests {
 
     #[test]
     fn cssstyledeclaration_is_a_usable_global_interface() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // CSSStyleDeclaration was pre-declared non-enumerable but never assigned
         // a value (the only WebIDL interface missing its globalThis.X = X line),
         // so it was `undefined` while `'CSSStyleDeclaration' in window` was true,
@@ -15613,6 +16077,7 @@ mod tests {
 
     #[test]
     fn test_create_event_rejects_unknown_interface() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -15631,6 +16096,7 @@ mod tests {
 
     #[test]
     fn event_constructor_matches_webidl_conformance() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // new Event()/new CustomEvent() must throw (type is a required arg),
         // the type argument must be coerced to a string, CustomEvent.detail must
         // default to null (not undefined), createEvent must still build a
@@ -15659,6 +16125,7 @@ mod tests {
 
     #[test]
     fn test_promise_rejection_event_requires_promise() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -15688,6 +16155,7 @@ mod tests {
 
     #[test]
     fn test_create_event_rejects_promise_rejection_event() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -15706,6 +16174,7 @@ mod tests {
 
     #[test]
     fn test_create_event_supports_legacy_event_aliases() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -15728,6 +16197,7 @@ mod tests {
 
     #[test]
     fn test_storage_event_constructor_and_legacy_factory() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -15773,6 +16243,7 @@ mod tests {
 
     #[test]
     fn test_html_to_markdown_headings() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime("<html><body><h1>Title</h1><h2>Sub</h2><p>Body</p></body></html>");
         let md = rt
@@ -15788,6 +16259,7 @@ mod tests {
 
     #[test]
     fn test_html_to_markdown_links_and_inline() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><body><p>Hello <strong>world</strong> <a href="https://x.test/">link</a> <em>em</em></p></body></html>"#,
         );
@@ -15808,6 +16280,7 @@ mod tests {
 
     #[test]
     fn test_html_to_markdown_lists() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             "<html><body><ul><li>A</li><li>B</li></ul><ol><li>X</li><li>Y</li></ol></body></html>",
         );
@@ -15824,6 +16297,7 @@ mod tests {
 
     #[test]
     fn test_html_to_markdown_skips_script_and_style() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             "<html><body><p>Text</p><script>alert(1)</script><style>body{color:red}</style></body></html>",
         );
@@ -15840,6 +16314,7 @@ mod tests {
 
     #[test]
     fn test_page_content_puppeteer_pattern() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt =
             setup_runtime("<!DOCTYPE html><html><head></head><body><p>Test</p></body></html>");
         let result = rt.evaluate(
@@ -15853,6 +16328,7 @@ mod tests {
 
     #[test]
     fn test_element_from_point_is_function() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let kind = rt.evaluate("typeof document.elementFromPoint").unwrap();
         assert_eq!(kind, serde_json::json!("function"));
@@ -15862,6 +16338,7 @@ mod tests {
 
     #[test]
     fn test_element_from_point_in_viewport_returns_body() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><h1>Hi</h1></body></html>");
         let tag = rt
             .evaluate("document.elementFromPoint(10, 10)?.tagName")
@@ -15871,6 +16348,7 @@ mod tests {
 
     #[test]
     fn test_element_from_point_out_of_viewport_returns_null() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let neg_x = rt.evaluate("document.elementFromPoint(-1, 10)").unwrap();
         assert_eq!(neg_x, serde_json::Value::Null);
@@ -15884,6 +16362,7 @@ mod tests {
 
     #[test]
     fn test_elements_from_point_returns_array() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let len_in = rt
             .evaluate("document.elementsFromPoint(10, 10).length")
@@ -15897,6 +16376,7 @@ mod tests {
 
     #[test]
     fn test_element_from_point_non_numeric_returns_null() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let nan = rt.evaluate("document.elementFromPoint(NaN, 10)").unwrap();
         assert_eq!(nan, serde_json::Value::Null);
@@ -16121,6 +16601,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn entry_module_http_failure_is_not_evaluated_as_empty_source() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let base = spawn_one_response_server("404 Not Found", "not found");
         let jar = std::sync::Arc::new(obscura_net::CookieJar::new());
         let client = std::sync::Arc::new(obscura_net::ObscuraHttpClient::with_full_options(
@@ -16142,6 +16623,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dependency_prepared_as_root_is_evaluated_only_once() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let base = spawn_duplicate_module_graph_server();
         let jar = std::sync::Arc::new(obscura_net::CookieJar::new());
         let client = std::sync::Arc::new(obscura_net::ObscuraHttpClient::with_full_options(
@@ -16177,6 +16659,7 @@ mod tests {
 
     #[test]
     fn heap_limit_terminates_script_and_runtime_recovers() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         crate::v8_flags::set_v8_flags("--max-old-space-size=32 --max-semi-space-size=1");
         let mut rt = ObscuraJsRuntime::new();
 
@@ -16200,6 +16683,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn descendant_module_uses_page_cookie_identity_and_headers() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_module_graph_server(ModuleGraphFixture::CookieProtected);
         let page_url = url::Url::parse(&format!("{}/", base)).unwrap();
         let jar = std::sync::Arc::new(obscura_net::CookieJar::new());
@@ -16273,6 +16757,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cross_origin_module_descendant_does_not_gain_module_origin_cookies() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let module_base = format!("http://{address}");
@@ -16354,6 +16839,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn descendant_module_follows_page_client_redirects() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_module_graph_server(ModuleGraphFixture::RedirectedChild);
         let jar = std::sync::Arc::new(obscura_net::CookieJar::new());
         let client = std::sync::Arc::new(obscura_net::ObscuraHttpClient::with_full_options(
@@ -16392,6 +16878,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn import_map_resolves_prefix_static_and_exact_dynamic_imports() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_import_map_server();
         let jar = std::sync::Arc::new(obscura_net::CookieJar::new());
         let client = std::sync::Arc::new(obscura_net::ObscuraHttpClient::with_full_options(
@@ -16443,6 +16930,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn import_map_does_not_remap_external_root_module_url() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_root_module_import_map_server();
         let jar = std::sync::Arc::new(obscura_net::CookieJar::new());
         let client = std::sync::Arc::new(obscura_net::ObscuraHttpClient::with_full_options(
@@ -16473,6 +16961,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn inline_modules_expose_document_base_as_import_meta_url() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::with_base_url("https://example.com/page/index.html");
         rt.load_inline_module(
             "globalThis.__first_inline_url = import.meta.url;",
@@ -16498,6 +16987,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn classic_script_url_is_dynamic_import_referrer() {
+        let _glass_fixture_state = crate::runtime::glass_fixture_env::local_fixture();
         use std::io::{Read as _, Write as _};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -16557,6 +17047,7 @@ mod tests {
 
     #[test]
     fn timed_out_classic_script_leaves_runtime_reusable() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::new();
         rt.execute_script_with_timeout(
             "https://example.test/hang.js",
@@ -16577,6 +17068,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn inline_module_graph_error_propagates() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::with_base_url("https://example.com/");
         let error = rt
             .load_inline_module("import 'bare-specifier';", "https://example.com/", 1_000)
@@ -16591,6 +17083,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn inline_module_evaluation_error_propagates() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::with_base_url("https://example.com/");
         let error = rt
             .load_inline_module(
@@ -16609,6 +17102,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn inline_module_evaluation_timeout_propagates() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::with_base_url("https://example.com/");
         let error = rt
             .load_inline_module(
@@ -16627,6 +17121,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn successful_inline_module_does_not_wait_for_interval_idle() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = ObscuraJsRuntime::with_base_url("https://example.com/");
         rt.load_inline_module(
             "globalThis.__module_loaded = true; setInterval(() => {}, 10000);",
@@ -16653,6 +17148,7 @@ mod tests {
     // the prod fix.
     #[test]
     fn http_client_round_trips_proxy_url() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         use obscura_net::{CookieJar, ObscuraHttpClient};
         let jar = std::sync::Arc::new(CookieJar::new());
         let configured =
@@ -16673,6 +17169,7 @@ mod tests {
 
     #[test]
     fn module_loader_stores_proxy_for_dynamic_imports() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         use crate::module_loader::ObscuraModuleLoader;
         let loader = ObscuraModuleLoader::with_proxy(
             "https://example.com/",
@@ -16688,6 +17185,7 @@ mod tests {
 
     #[test]
     fn runtime_with_base_url_and_proxy_constructs_successfully() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // Sanity-check the public ctor that page.rs uses to thread proxy
         // through to the module loader. Direct (None) and proxied paths
         // must both initialise the JS environment.
@@ -16711,6 +17209,7 @@ mod tests {
     /// than the undefined path.
     #[test]
     fn element_check_visibility_is_callable() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="x">x</div>"#);
         let result = rt
             .evaluate("document.getElementById('x').checkVisibility({checkOpacity: true})")
@@ -16728,6 +17227,7 @@ mod tests {
     /// fail. Reflect the underlying aria-* attributes.
     #[test]
     fn element_aria_reflection_properties_read_aria_attrs() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<button id="b" role="tab" aria-label="Settings" aria-selected="true">x</button>"#,
         );
@@ -16752,6 +17252,7 @@ mod tests {
     /// "addEventListener is not a function".
     #[test]
     fn navigator_eventtarget_stubs_expose_add_event_listener() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<div></div>");
         let result = rt
             .evaluate(
@@ -16787,6 +17288,7 @@ mod tests {
 
     #[test]
     fn text_codec_streams_expose_browser_shape() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<div></div>");
         let result = rt
             .evaluate(
@@ -16819,6 +17321,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn text_encoder_stream_pipe_through_delivers_hydration_data() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<div></div>");
         let result = rt
             .evaluate_for_cdp(
@@ -16866,6 +17369,7 @@ mod tests {
     /// parsed as markup, which is the whole point of the API.
     #[test]
     fn element_insert_adjacent_text_polyfill() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="p"><span id="t">X</span></div>"#);
         let result = rt
             .evaluate(
@@ -16896,6 +17400,7 @@ mod tests {
     /// returned (per spec — that's the contract callers rely on for chaining).
     #[test]
     fn element_insert_adjacent_element_polyfill() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="p"><span id="t">X</span></div>"#);
         let result = rt
             .evaluate(
@@ -16933,6 +17438,7 @@ mod tests {
 
     #[test]
     fn console_log_error_does_not_trigger_prepare_stack_trace() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<div></div>");
         let result = rt
             .evaluate(
@@ -16952,6 +17458,7 @@ mod tests {
 
     #[test]
     fn element_aria_reflection_setters_write_through() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<div id="d"></div>"#);
         let result = rt
             .evaluate(
@@ -16971,6 +17478,7 @@ mod tests {
     /// still deliver callbacks (including object, once, and signal listeners).
     #[test]
     fn standalone_event_target_delivers_framework_lifecycle_events() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<div></div>");
         let result = rt
             .evaluate(
@@ -17024,6 +17532,7 @@ mod tests {
 
     #[test]
     fn media_text_tracks_expose_loaded_webvtt_cues() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<video><track id="captions" kind="captions" srclang="en" default
                 src="data:text/vtt,WEBVTT%0A%0A00%3A00%3A01.000%20--%3E%2000%3A00%3A03.000%0AHello"></video>"#,
@@ -17062,6 +17571,7 @@ mod tests {
 
     #[test]
     fn unsupported_media_capabilities_and_readiness_are_honest() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<video id="media" src="https://example.test/movie.mp4"
                 poster="https://example.test/poster.png"></video>"#,
@@ -17102,6 +17612,7 @@ mod tests {
 
     #[test]
     fn html_string_scripts_remain_inert_when_connected() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><head></head><body><div id=target></div></body></html>");
         let result = rt
             .evaluate(
@@ -17166,6 +17677,7 @@ mod tests {
 
     #[test]
     fn connected_insertion_prepares_dynamic_script_subtrees_once() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><head></head><body><i id=anchor></i></body></html>");
         let result = rt
             .evaluate(
@@ -17207,6 +17719,7 @@ mod tests {
 
     #[test]
     fn script_clone_preserves_started_state() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             "<html><head></head><body><script id=parser>globalThis.__cloneScriptRuns++</script></body></html>",
         );
@@ -17241,6 +17754,7 @@ mod tests {
 
     #[test]
     fn contextual_fragment_and_document_write_keep_executable_script_policy() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><head></head><body><div id=context></div></body></html>");
         let result = rt
             .evaluate(
@@ -17268,6 +17782,7 @@ mod tests {
     // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-write
     #[test]
     fn document_write_joins_an_element_split_across_calls() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -17286,6 +17801,7 @@ mod tests {
 
     #[test]
     fn document_write_joins_a_tag_name_split_across_calls() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -17304,6 +17820,7 @@ mod tests {
     // The shape the UI5 cachebuster writes: "<script", one per attribute, then ">".
     #[test]
     fn document_write_runs_a_script_split_across_calls() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -17326,6 +17843,7 @@ mod tests {
     // the parser saw after it.
     #[test]
     fn document_write_inserts_at_the_writing_scripts_position() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><head><script id="writer"></script></head><body><p id="existing">x</p></body></html>"#,
         );
@@ -17353,6 +17871,7 @@ mod tests {
     // Holding back until the close would lose everything written after it. It belongs inside.
     #[test]
     fn document_write_shows_an_element_that_is_never_closed() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -17369,6 +17888,7 @@ mod tests {
 
     #[test]
     fn document_write_grows_an_open_element_across_calls() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -17394,6 +17914,7 @@ mod tests {
     // Writing goes through the same insertion steps as any other insertion.
     #[test]
     fn document_write_reports_to_mutation_observers() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -17423,6 +17944,7 @@ mod tests {
     // also pins that every insertion is reported exactly once, not twice.
     #[test]
     fn child_node_methods_place_nodes_and_report_once() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(r#"<html><body><p id="a"></p><p id="b"></p></body></html>"#);
         let result = rt
             .evaluate(
@@ -17464,6 +17986,7 @@ mod tests {
     // insertBefore reported no mutation at all, appendChild did.
     #[test]
     fn insert_before_reports_to_mutation_observers() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body><p id=\"ref\"></p></body></html>");
         let result = rt
             .evaluate(
@@ -17487,6 +18010,7 @@ mod tests {
 
     #[test]
     fn document_write_registers_window_named_access() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
@@ -17502,6 +18026,7 @@ mod tests {
 
     #[test]
     fn document_write_keeps_call_order_at_the_insertion_point() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime(
             r#"<html><head><script id="writer"></script></head><body></body></html>"#,
         );
@@ -17525,6 +18050,7 @@ mod tests {
     /// pending timer.
     #[tokio::test(flavor = "current_thread")]
     async fn unhandled_rejection_does_not_starve_later_tasks() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.evaluate(
             "(function() { \
@@ -17550,6 +18076,7 @@ mod tests {
     /// whose OS locale is not en-US. The pinned default must win.
     #[test]
     fn intl_locale_matches_navigator_language_regardless_of_host() {
+        let _glass_isolated_state = crate::runtime::glass_fixture_env::isolated_state();
         // nextest runs each test in its own process, so setting the process
         // locale here cannot race another test's V8 init.
         std::env::set_var("LC_ALL", "de-DE");
@@ -17569,3 +18096,6 @@ mod tests {
 }
 
 
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

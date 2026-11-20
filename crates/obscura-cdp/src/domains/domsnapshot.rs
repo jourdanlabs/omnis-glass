@@ -320,6 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_snapshot_matches_getdocument_and_flags_clickable() {
+        let _glass_isolated_state = crate::domains::domsnapshot::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let session = navigate(&mut ctx, "<button id=go>Go</button><a href=/x>L</a>").await;
 
@@ -405,6 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_domsnapshot_method_is_permissive_noop() {
+        let _glass_isolated_state = crate::domains::domsnapshot::glass_fixture_env::isolated_state();
         // Probing the domain (e.g. getSnapshot) must not abort with an
         // Unknown-method error the way an unhandled domain would.
         let mut ctx = CdpContext::new();
@@ -414,3 +416,6 @@ mod tests {
         assert!(r.is_object());
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

@@ -498,6 +498,7 @@ mod tests {
 
     #[test]
     fn content_editing_hosts_expose_ax_values_without_duplicating_descendants() {
+        let _glass_isolated_state = crate::domains::accessibility::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<div id="true" contenteditable="TrUe">true</div>
                <div id="empty-keyword" contenteditable>empty keyword</div>
@@ -522,3 +523,6 @@ mod tests {
         assert_ax_value(&nodes, &dom, "reenabled-child", None);
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

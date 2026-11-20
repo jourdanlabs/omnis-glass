@@ -59,6 +59,8 @@ pub struct OutboundEnvelope {
     pub coverage_class: String,
     pub agent_id: String,
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_event: Option<bool>,
 }
 
 impl OutboundEnvelope {
@@ -81,11 +83,12 @@ impl OutboundEnvelope {
             coverage_class: coverage_class.into(),
             agent_id: "glass".into(),
             session_id: session_id.into(),
+            key_event: None,
         }
     }
 
     pub fn to_authorize_action(&self) -> Value {
-        serde_json::json!({
+        let mut action = serde_json::json!({
             "agent_id": self.agent_id,
             "kind": "browser",
             "modality": self.modality,
@@ -96,7 +99,9 @@ impl OutboundEnvelope {
             "policy_version": self.policy_version,
             "coverage_class": self.coverage_class,
             "session_id": self.session_id,
-        })
+        });
+        if self.key_event == Some(true) { action["key_event"] = Value::Bool(true); }
+        action
     }
 }
 

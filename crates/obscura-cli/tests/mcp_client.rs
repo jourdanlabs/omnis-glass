@@ -40,9 +40,17 @@ impl TestPageServer {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                        let mut request = [0u8; 2048];
-                        let _ = stream.read(&mut request);
+                        let mut request = Vec::new();
+                        let mut chunk = [0u8; 512];
+                        while request.len() < 8192 && !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match stream.read(&mut chunk) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => request.extend_from_slice(&chunk[..n]),
+                            }
+                        }
+                        if !request.windows(4).any(|w| w == b"\r\n\r\n") { continue; }
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             TEST_PAGE.len(),
@@ -188,7 +196,23 @@ fn content_text(resp: &serde_json::Value) -> &str {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[test]
+fn fixture_waits_for_complete_request_headers() {
+    let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
+    let server = TestPageServer::spawn();
+    let mut stream = TcpStream::connect(server.addr).unwrap();
+    stream.set_read_timeout(Some(Duration::from_millis(150))).unwrap();
+    stream.write_all(b"GET / HTTP/1.1\r\nHost: local").unwrap();
+    let mut response = [0u8; 4096];
+    assert!(stream.read(&mut response).is_err(), "fixture responded before headers completed");
+    stream.write_all(b"host\r\n\r\n").unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let count = stream.read(&mut response).unwrap();
+    assert!(String::from_utf8_lossy(&response[..count]).starts_with("HTTP/1.1 200 OK"));
+}
+
+#[test]
 fn test_initialize() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let mut c = McpClient::spawn();
     // A second initialize should still return a valid response
     let resp = c.call(
@@ -199,11 +223,12 @@ fn test_initialize() {
         }),
     );
     assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
-    assert_eq!(resp["result"]["serverInfo"]["name"], "obscura-mcp");
+    assert_eq!(resp["result"]["serverInfo"]["name"], "omnis-glass");
 }
 
 #[test]
 fn test_ping() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let mut c = McpClient::spawn();
     let resp = c.call("ping", serde_json::json!({}));
     assert!(resp.get("error").is_none(), "ping should not error");
@@ -212,6 +237,7 @@ fn test_ping() {
 
 #[test]
 fn test_tools_list() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let mut c = McpClient::spawn();
     let resp = c.call("tools/list", serde_json::json!({}));
     let tools = resp["result"]["tools"].as_array().expect("tools array");
@@ -237,6 +263,7 @@ fn test_tools_list() {
 
 #[test]
 fn test_resources_list() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let mut c = McpClient::spawn();
     let resp = c.call("resources/list", serde_json::json!({}));
     assert!(resp.get("error").is_none());
@@ -245,6 +272,7 @@ fn test_resources_list() {
 
 #[test]
 fn test_prompts_list() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let mut c = McpClient::spawn();
     let resp = c.call("prompts/list", serde_json::json!({}));
     assert!(resp.get("error").is_none());
@@ -253,6 +281,7 @@ fn test_prompts_list() {
 
 #[test]
 fn test_unknown_method_returns_error() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let mut c = McpClient::spawn();
     let resp = c.call("nonexistent/method", serde_json::json!({}));
     assert_eq!(resp["error"]["code"], -32601);
@@ -260,6 +289,7 @@ fn test_unknown_method_returns_error() {
 
 #[test]
 fn test_notifications_are_silent() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     // Notifications must not produce a response; the next real call should succeed
     let mut c = McpClient::spawn();
     c.notify("notifications/initialized", serde_json::json!({}));
@@ -272,6 +302,7 @@ fn test_notifications_are_silent() {
 
 #[test]
 fn test_navigate_and_snapshot() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = TestPageServer::spawn();
     let mut c = McpClient::spawn();
 
@@ -289,9 +320,11 @@ fn test_navigate_and_snapshot() {
 
 #[test]
 fn test_evaluate() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = TestPageServer::spawn();
     let mut c = McpClient::spawn();
-    c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    let navigation = c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    assert!(navigation["result"]["isError"].is_null(), "navigation failed: {navigation}");
 
     let resp = c.tool(
         "browser_evaluate",
@@ -303,9 +336,11 @@ fn test_evaluate() {
 
 #[test]
 fn test_evaluate_math() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = TestPageServer::spawn();
     let mut c = McpClient::spawn();
-    c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    let navigation = c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    assert!(navigation["result"]["isError"].is_null(), "navigation failed: {navigation}");
 
     let resp = c.tool(
         "browser_evaluate",
@@ -318,6 +353,7 @@ fn test_evaluate_math() {
 
 #[test]
 fn test_wait_drives_timer_and_queued_navigation() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let mut c = McpClient::spawn();
     c.tool(
         "browser_navigate",
@@ -352,9 +388,11 @@ fn test_wait_drives_timer_and_queued_navigation() {
 
 #[test]
 fn test_wait_for_selector() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = TestPageServer::spawn();
     let mut c = McpClient::spawn();
-    c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    let navigation = c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    assert!(navigation["result"]["isError"].is_null(), "navigation failed: {navigation}");
 
     let resp = c.tool(
         "browser_wait_for",
@@ -366,9 +404,11 @@ fn test_wait_for_selector() {
 
 #[test]
 fn test_wait_for_timeout() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = TestPageServer::spawn();
     let mut c = McpClient::spawn();
-    c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    let navigation = c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    assert!(navigation["result"]["isError"].is_null(), "navigation failed: {navigation}");
 
     let resp = c.tool(
         "browser_wait_for",
@@ -380,6 +420,7 @@ fn test_wait_for_timeout() {
 
 #[test]
 fn test_navigate_missing_url_returns_error() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let mut c = McpClient::spawn();
     let resp = c.tool("browser_navigate", serde_json::json!({}));
     assert_eq!(resp["result"]["isError"], true);
@@ -387,6 +428,7 @@ fn test_navigate_missing_url_returns_error() {
 
 #[test]
 fn test_unknown_tool_returns_error() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let mut c = McpClient::spawn();
     let resp = c.tool("browser_does_not_exist", serde_json::json!({}));
     assert_eq!(resp["result"]["isError"], true);
@@ -394,9 +436,11 @@ fn test_unknown_tool_returns_error() {
 
 #[test]
 fn test_network_requests() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = TestPageServer::spawn();
     let mut c = McpClient::spawn();
-    c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    let navigation = c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    assert!(navigation["result"]["isError"].is_null(), "navigation failed: {navigation}");
 
     let resp = c.tool("browser_network_requests", serde_json::json!({}));
     let text = content_text(&resp);
@@ -408,9 +452,11 @@ fn test_network_requests() {
 
 #[test]
 fn test_close_resets_state() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let server = TestPageServer::spawn();
     let mut c = McpClient::spawn();
-    c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    let navigation = c.tool("browser_navigate", serde_json::json!({"url": server.url()}));
+    assert!(navigation["result"]["isError"].is_null(), "navigation failed: {navigation}");
     let close = c.tool("browser_close", serde_json::json!({}));
     assert!(close["result"]["isError"].is_null());
 
@@ -418,3 +464,6 @@ fn test_close_resets_state() {
     let snap = c.tool("browser_snapshot", serde_json::json!({}));
     assert!(snap["result"]["isError"].is_null());
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

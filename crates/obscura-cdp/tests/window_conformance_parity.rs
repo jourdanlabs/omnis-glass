@@ -80,6 +80,7 @@ async fn setup() -> (CdpContext, String) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn element_toggle_attribute_is_callable_and_toggles() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     // Element.prototype.toggleAttribute is on every real Chrome. Bootstrap
     // leaves it undefined, so any framework that calls el.toggleAttribute()
@@ -109,6 +110,7 @@ async fn element_toggle_attribute_is_callable_and_toggles() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn document_adopt_node_moves_node() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     // document.adoptNode is standard DOM; bootstrap leaves it undefined.
     // Frameworks that move nodes between documents (iframes, portals) call it.
@@ -134,3 +136,6 @@ async fn document_adopt_node_moves_node() {
     assert_eq!(val["sameNode"], true);
     assert_eq!(val["ownerDoc"], true);
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

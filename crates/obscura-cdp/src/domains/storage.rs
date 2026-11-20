@@ -78,6 +78,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_cookies_is_scoped_to_browser_context() {
+        let _glass_isolated_state = crate::domains::storage::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let browser_context_id = ctx.create_browser_context();
         ctx.browser_context(&browser_context_id)
@@ -110,6 +111,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_cookies_without_context_clears_default_context() {
+        let _glass_isolated_state = crate::domains::storage::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         ctx.default_context
             .cookie_jar
@@ -122,3 +124,6 @@ mod tests {
         assert!(ctx.default_context.cookie_jar.get_all_cookies().is_empty());
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

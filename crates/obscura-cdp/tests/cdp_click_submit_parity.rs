@@ -82,6 +82,7 @@ async fn cdp(
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_click_submit_prevent_default_navigation_updates_page() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve_once().await;
     let mut ctx = CdpContext::new();
@@ -144,3 +145,6 @@ async fn runtime_click_submit_prevent_default_navigation_updates_page() {
         .unwrap()
         .contains("submitted"));
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

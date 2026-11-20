@@ -11,7 +11,7 @@
     {
       "file": "crates/obscura-cli/src/main.rs",
       "pattern": "page.evaluate",
-      "lines": [951, 1083, 1109],
+      "lines": [1007, 1139, 1165],
       "reason": "capture-harness viewport reads after navigate/eval TERMINUS gates in run_fetch"
     }
   ]

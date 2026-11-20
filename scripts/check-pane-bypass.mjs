@@ -1,51 +1,22 @@
 #!/usr/bin/env node
-// Pane bypass guard — no direct Page/HTTP from pane crates.
-
+// Page and input operations must pass through the observer's human command.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-
 const ROOT = join(import.meta.dirname, '..');
-const TARGETS = [
-  'crates/glass-pane/src',
-  'crates/glass-pane-bridge/src',
-  'crates/glass-pane-ui/src',
-];
-
-const FORBIDDEN = [
-  /\bPage::navigate/,
-  /\bPage::evaluate/,
-  /\bObscuraHttpClient::/,
-];
-
+const targets = ['crates/glass-pane/src', 'crates/glass-pane-bridge/src', 'crates/glass-pane-ui/src'];
 const violations = [];
-for (const rel of TARGETS) {
-  walk(join(ROOT, rel));
-}
-
 function walk(dir) {
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, ent.name);
-    if (ent.isDirectory()) walk(p);
-    else if (ent.name.endsWith('.rs')) {
-      const src = readFileSync(p, 'utf8');
-      if (!src.includes('gate_browser_action') && !src.includes('gate_pane_navigate') && p.includes('glass-pane-bridge')) {
-        if (!src.includes('cdp_client') && !src.includes('pane_auth')) {
-          // bridge must not call Page directly — checked via FORBIDDEN
-        }
-      }
-      for (const re of FORBIDDEN) {
-        if (re.test(src)) violations.push({ file: p.replace(ROOT + '/', ''), re: re.toString() });
-      }
-      if (p.includes('session.rs') && !src.includes('gate_pane_navigate')) {
-        violations.push({ file: p.replace(ROOT + '/', ''), re: 'missing gate_pane_navigate' });
-      }
-    }
+    const file = join(dir, ent.name);
+    if (ent.isDirectory()) { walk(file); continue; }
+    if (!ent.name.endsWith('.rs')) continue;
+    const src = readFileSync(file, 'utf8');
+    const forbidden = [/\bPage::navigate\b/, /\bPage::evaluate\b/, /\bObscuraHttpClient\b/, /\b(?:reqwest|wreq)::/,
+      /\b(?:call|send)\s*\(\s*"(?:Page|Input)\.[^"]+"/,
+      /["']method["']\s*:\s*["'](?:Page|Input)\.[^"']+["']/];
+    for (const pattern of forbidden) if (pattern.test(src)) violations.push(`${file}: ${pattern}`);
   }
 }
-
-if (violations.length) {
-  console.error('check-pane-bypass: FAIL');
-  for (const v of violations) console.error(`  ${v.file} (${v.re})`);
-  process.exit(1);
-}
+for (const dir of targets) walk(join(ROOT, dir));
+if (violations.length) { console.error('check-pane-bypass: FAIL'); for (const v of violations) console.error(v); process.exit(1); }
 console.log('check-pane-bypass: OK');

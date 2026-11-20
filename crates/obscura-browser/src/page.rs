@@ -292,6 +292,7 @@ pub struct Page {
     /// is suspended for CDP/MCP tab switching.  These are restored only when
     /// the same surviving DomTree is resumed; navigation clears them.
     suspended_started_script_ids: Vec<u32>,
+    scripts_stopped: bool,
     /// Passive on_request/on_response callbacks, scoped to this page (issue
     /// #408): they fire only for requests this page drives and die with it.
     /// Arc because the JS runtime state holds a second handle for fetch()/XHR.
@@ -526,13 +527,24 @@ fn rebase_css_urls(css: &str, base: &url::Url) -> String {
     out
 }
 
+#[cfg(test)]
+thread_local! { static CSS_RESOURCE_SCAN_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+fn css_at_keyword(input: &str, keyword: &str) -> bool {
+    input.get(..keyword.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+        && !input[keyword.len()..].chars().next().is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
 /// Extract network-backed `url(...)` assets while respecting CSS comments and
 /// strings. Linked sheets have already been rebased before materialization;
 /// inline declarations are resolved against the document base here.
 fn css_resource_urls(css: &str, base: &url::Url) -> Vec<String> {
     let mut urls = Vec::new();
     let mut index = 0usize;
+    let mut imports_exhausted = false;
+    let mut fonts_exhausted = false;
     while index < css.len() {
+        #[cfg(test)] CSS_RESOURCE_SCAN_VISITS.with(|visits| visits.set(visits.get() + 1));
         let rest = &css[index..];
         if rest.starts_with("/*") {
             if let Some(end) = rest[2..].find("*/") {
@@ -546,19 +558,29 @@ fn css_resource_urls(css: &str, base: &url::Url) -> Vec<String> {
         // It is fetched by the bounded stylesheet graph above. Letting the
         // generic image/font warmup rediscover it issues a second request with
         // the wrong ResourceType::Image classification.
-        if let Some(length) = css_import_rule_len(rest) {
-            index += length;
-            continue;
+        if !imports_exhausted && css_at_keyword(rest, "@import") {
+            if let Some(length) = css_import_rule_len(rest) {
+                index += length;
+                continue;
+            }
+            // Preserve the generic fallback, but never rescan its tail for
+            // more imports after a malformed rule has already scanned it.
+            imports_exhausted = true;
         }
         // A `@font-face` `src` list is a priority order, not a set of
         // resources. Scanning it generically warms every entry of every
         // descriptor; the renderer considers far fewer. `css_font_face_rule`
         // collects the ones it will consider and reports the whole block as
         // consumed, the same shape as the `@import` skip above.
-        if let Some((length, sources)) = css_font_face_rule(rest, base) {
-            urls.extend(sources);
-            index += length;
-            continue;
+        if !fonts_exhausted && css_at_keyword(rest, "@font-face") {
+            if let Some((length, sources)) = css_font_face_rule(rest, base) {
+                urls.extend(sources);
+                index += length;
+                continue;
+            }
+            // An unterminated block can contain arbitrarily many more rule
+            // prefixes. Scan its tail once with the generic URL fallback.
+            fonts_exhausted = true;
         }
         let Some(first) = rest.chars().next() else {
             break;
@@ -663,7 +685,9 @@ fn css_font_face_rule(css: &str, base: &url::Url) -> Option<(usize, Vec<String>)
     if !css.get(..10)?.eq_ignore_ascii_case("@font-face") {
         return None;
     }
-    let open_relative = css[10..].find('{')?;
+    let open_relative = css[10..].find('{');
+    #[cfg(test)] CSS_RESOURCE_SCAN_VISITS.with(|visits| visits.set(visits.get() + open_relative.unwrap_or(css.len() - 10)));
+    let open_relative = open_relative?;
     if !css[10..10 + open_relative].trim().is_empty() {
         return None;
     }
@@ -688,6 +712,7 @@ fn css_block_end(css: &str) -> Option<usize> {
     let mut quote: Option<char> = None;
     let mut escaped = false;
     for (offset, ch) in css.char_indices() {
+        #[cfg(test)] CSS_RESOURCE_SCAN_VISITS.with(|visits| visits.set(visits.get() + 1));
         if escaped {
             escaped = false;
             continue;
@@ -826,6 +851,7 @@ fn css_import_rule_len(css: &str) -> Option<usize> {
     let mut escaped = false;
     let mut paren_depth = 0usize;
     while index < bytes.len() {
+        #[cfg(test)] CSS_RESOURCE_SCAN_VISITS.with(|visits| visits.set(visits.get() + 1));
         let byte = bytes[index];
         if let Some(open) = quote {
             if escaped {
@@ -1134,6 +1160,7 @@ impl Page {
             preload_scripts: Vec::new(),
             runtime_events_enabled: std::cell::Cell::new(false),
             suspended_started_script_ids: Vec::new(),
+            scripts_stopped: false,
             callbacks: Arc::new(CallbackRegistry::new()),
             #[cfg(feature = "stealth")]
             stealth_client,
@@ -1601,6 +1628,7 @@ impl Page {
             .await
     }
     fn init_js(&mut self) {
+        self.scripts_stopped = false;
         // init_js is also the new-document path.  Only resume_js explicitly
         // takes these IDs out before entering here and restores them after the
         // same DomTree is installed; a navigation must never inherit IDs from
@@ -3038,7 +3066,6 @@ impl Page {
 
         self.lifecycle = LifecycleState::Loading;
         self.referrer = referrer.to_string();
-        self.url = Some(url.clone());
         self.network_events.clear();
 
         if self.context.obey_robots {
@@ -3124,6 +3151,10 @@ impl Page {
             self.lifecycle = LifecycleState::Failed;
             PageError::NetworkError(e.to_string())
         })?;
+
+        // A failed fetch leaves the previous document in place. Commit the
+        // URL only once a response exists, so its identity matches that DOM.
+        self.url = Some(url.clone());
 
         // Store binary main resources (images, PDFs, octet-stream) base64 so
         // Network.getResponseBody returns intact bytes. A UTF-8-lossy text store
@@ -3375,6 +3406,7 @@ impl Page {
     }
 
     pub fn navigate_blank(&mut self) {
+        self.scripts_stopped = false;
         self.frames.clear();
         self.js = None;
         self.url = Some(Url::parse("about:blank").unwrap());
@@ -4197,6 +4229,7 @@ impl Page {
         let Some(js) = &self.js else {
             return;
         };
+        self.scripts_stopped = true;
         let started_script_ids = js.started_script_ids();
         let dom = js.take_dom();
         if let Some(dom) = dom {
@@ -4219,10 +4252,16 @@ impl Page {
             return;
         }
         let started_script_ids = std::mem::take(&mut self.suspended_started_script_ids);
+        let scripts_stopped = self.scripts_stopped;
         self.init_js();
+        self.scripts_stopped = scripts_stopped;
         if let Some(js) = &self.js {
             js.restore_started_script_ids(&started_script_ids);
         }
+    }
+
+    pub fn scripts_stopped(&self) -> bool {
+        self.scripts_stopped
     }
 
     pub fn has_js(&self) -> bool {
@@ -4325,13 +4364,13 @@ impl Page {
 
     pub async fn process_pending_navigation(&mut self) -> Result<bool, PageError> {
         if let Some((url, method, body)) = self.take_pending_navigation() {
-            glass_govern::gate_browser_action(
-                glass_terminus::BrowserAction::Navigate,
-                &url,
-                None,
-                &self.id,
-            )
-            .map_err(|reason| PageError::NetworkError(format!("Request blocked: {reason}")))?;
+            // Hand the approved document GET to the outbound gate once, just
+            // as a CDP navigation does. POSTs and redirects remain re-gated.
+            if method == "GET" && body.is_empty() {
+                glass_govern::gate_approved_navigation(&url, &self.id)
+            } else {
+                glass_govern::gate_browser_action(glass_terminus::BrowserAction::Navigate, &url, None, &self.id)
+            }.map_err(|reason| PageError::NetworkError(format!("Request blocked: {reason}")))?;
 
             let source_url = self
                 .url
@@ -4435,6 +4474,7 @@ mod tests {
 
     #[test]
     fn navigation_timeout_environment_default_remains_thirty_seconds() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         assert_eq!(
             navigation_timeout_from_env_value(None),
             std::time::Duration::from_secs(30)
@@ -4447,6 +4487,7 @@ mod tests {
 
     #[test]
     fn navigation_timeout_environment_override_remains_available() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         assert_eq!(
             navigation_timeout_from_env_value(Some("42000")),
             std::time::Duration::from_secs(42)
@@ -4455,6 +4496,7 @@ mod tests {
 
     #[test]
     fn navigation_chain_limit_environment_default_remains_ten() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         assert_eq!(navigation_chain_limit_from_env_value(None), 10);
         assert_eq!(
             navigation_chain_limit_from_env_value(Some("not-a-limit")),
@@ -4464,16 +4506,19 @@ mod tests {
 
     #[test]
     fn navigation_chain_limit_environment_override_remains_available() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         assert_eq!(navigation_chain_limit_from_env_value(Some("25")), 25);
     }
 
     #[test]
     fn navigation_chain_limit_raises_a_zero_that_would_load_nothing() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         assert_eq!(navigation_chain_limit_from_env_value(Some("0")), 1);
     }
 
     #[test]
     fn css_resource_discovery_ignores_strings_comments_data_and_fragments() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let base = url::Url::parse("https://example.test/css/app/main.css").unwrap();
         let css = r#"
             /* url(ignored.png) */
@@ -4496,6 +4541,7 @@ mod tests {
 
     #[test]
     fn font_face_warmup_takes_the_last_src_descriptor_and_skips_undecodable_sources() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         // The IE8 idiom: a bare `.eot` in its own descriptor, then the real
         // list. The renderer resolves the cascade to the second descriptor and
         // then drops `.eot` and `.svg`, so three of the six are all it will
@@ -4524,6 +4570,7 @@ mod tests {
 
     #[test]
     fn font_face_warmup_ignores_local_sources_and_keeps_scanning_after_the_block() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         // `local()` names an installed face and is not a fetch, and the block
         // has to be reported as consumed at exactly its closing brace, or the
         // rule after it would be skipped with it.
@@ -4546,6 +4593,7 @@ mod tests {
 
     #[test]
     fn font_face_warmup_skips_data_sources_and_survives_a_brace_in_a_string() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let base = url::Url::parse("https://example.test/css/app.css").unwrap();
         let css = r#"
             @font-face {
@@ -4566,6 +4614,7 @@ mod tests {
 
     #[test]
     fn an_unterminated_font_face_block_falls_back_to_the_generic_scan() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         // Better to warm too much than to drop the rest of the stylesheet on
         // the floor, which is the same policy `css_import_rule_len` follows.
         let base = url::Url::parse("https://example.test/css/app.css").unwrap();
@@ -4574,6 +4623,28 @@ mod tests {
             css_resource_urls(css, &base),
             vec!["https://example.test/css/probe.woff2".to_string()]
         );
+    }
+
+    fn assert_malformed_resource_scan_is_linear(pattern: &str) {
+        let base = url::Url::parse("https://example.test/app.css").unwrap();
+        for size in [50_000, 200_000, 400_000] {
+            let mut css = pattern.repeat(size / pattern.len());
+            css.push_str(&" ".repeat(size - css.len()));
+            super::CSS_RESOURCE_SCAN_VISITS.with(|visits| visits.set(0));
+            assert!(css_resource_urls(&css, &base).is_empty());
+            let visits = super::CSS_RESOURCE_SCAN_VISITS.with(|visits| visits.get());
+            assert!(visits <= size * 8, "{pattern:?}: {size} bytes, {visits} visits");
+        }
+    }
+
+    #[test]
+    fn unterminated_import_resource_scan_work_is_linear() {
+        assert_malformed_resource_scan_is_linear("@import x ");
+    }
+
+    #[test]
+    fn unterminated_font_face_resource_scan_work_is_linear() {
+        assert_malformed_resource_scan_is_linear("@font-face {");
     }
 
     fn spawn_stylesheet_graph_server(
@@ -4693,6 +4764,7 @@ mod tests {
 
     #[test]
     fn default_navigation_referrer_matches_strict_origin_when_cross_origin() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let source = url::Url::parse("https://user:pass@source.example/path?q=1#fragment").unwrap();
         let same_origin = url::Url::parse("https://source.example/next").unwrap();
         let cross_origin = url::Url::parse("https://target.example/next").unwrap();
@@ -4714,6 +4786,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn document_navigation_referrer_survives_http_redirects() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {
@@ -4835,11 +4908,28 @@ mod tests {
         super::Page::new(name.to_string(), context)
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn refused_page_navigation_stops_before_loading_the_target() {
+        let _state = crate::page::glass_fixture_env::isolated_state();
+        std::env::set_var("OMNIS_GLASS_ENFORCE", "enforce");
+        std::env::set_var("OMNIS_GLASS_LANE", "browse:human");
+        std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+        std::env::remove_var("OMNIS_GLASS_LANES");
+        let mut page = page_without_chain_limit("early-click-refusal");
+        page.navigate("data:text/html,<title>previous</title><body>old</body>").await.unwrap();
+        let lifecycle = page.lifecycle;
+        page.evaluate("location.assign('http://127.0.0.2/blocked')");
+        let error = page.process_pending_navigation().await.unwrap_err();
+        assert!(error.to_string().contains("REFUSE_HOST"), "{error}");
+        assert_eq!(page.lifecycle, lifecycle, "a refused click must not start loading the target");
+    }
+
     /// The only place where the name of the environment variable is checked
     /// as a string, and the variable is the only way to raise the limit at
     /// runtime. Without this test a typo in the name would stay green.
     #[test]
     fn navigation_chain_limit_reads_the_environment_variable_by_name() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         std::env::set_var("OBSCURA_NAV_CHAIN_LIMIT", "17");
 
         let page = page_without_chain_limit("chain-from-environment");
@@ -4849,6 +4939,7 @@ mod tests {
 
     #[test]
     fn a_per_page_navigation_chain_limit_wins_over_the_environment() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         std::env::set_var("OBSCURA_NAV_CHAIN_LIMIT", "17");
 
         let mut page = page_without_chain_limit("chain-per-page-wins");
@@ -4876,6 +4967,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn navigation_chain_default_allows_nine_client_navigations() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let address = client_navigation_chain_address("arrived", 10);
         let mut page = chain_page("chain-within-default", DEFAULT_NAVIGATION_CHAIN_LIMIT);
 
@@ -4888,6 +4980,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn navigation_chain_beyond_the_default_reports_client_navigations() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let address = client_navigation_chain_address("arrived", 10);
         let mut page = chain_page("chain-beyond-default", DEFAULT_NAVIGATION_CHAIN_LIMIT);
 
@@ -4908,6 +5001,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn raised_navigation_chain_limit_reaches_a_longer_chain() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let address = client_navigation_chain_address("arrived", 12);
         let mut page = chain_page("chain-raised", 12);
 
@@ -4920,6 +5014,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_zero_navigation_chain_limit_still_loads_the_initial_document() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let address = client_navigation_chain_address("arrived", 1);
         let mut page = chain_page("chain-zero", 0);
 
@@ -4932,6 +5027,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn linked_stylesheet_graph_fetches_once_and_preserves_order_and_bases() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let (origin, requests) = spawn_stylesheet_graph_server(4);
@@ -5023,6 +5119,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn inline_imports_fetch_in_order_and_materialize_before_source_style() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (origin, requests) = spawn_inline_import_server();
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             "inline-imports".to_string(),
@@ -5343,6 +5440,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn duplicate_cacheable_scripts_fetch_once_but_execute_for_each_element() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         use std::sync::atomic::Ordering;
 
         let (url, script_requests) = spawn_script_resource_cache_server(false);
@@ -5372,6 +5470,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn distinct_cacheable_scripts_keep_distinct_network_requests() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         use std::sync::atomic::Ordering;
 
         let (url, script_requests) = spawn_script_resource_cache_server(true);
@@ -5400,6 +5499,7 @@ mod tests {
 
     #[test]
     fn external_scripts_require_a_successful_http_status() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         assert!(script_response_is_executable(200));
         assert!(script_response_is_executable(204));
         assert!(script_response_is_executable(299));
@@ -5452,6 +5552,7 @@ mod tests {
     /// next navigation drops those handles against a different one.
     #[tokio::test]
     async fn suspending_the_runtime_releases_the_frame_realms_it_owns() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
         let base = spawn_shadow_frame_server().await;
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
@@ -5496,6 +5597,70 @@ mod tests {
         super::Page::new(name.to_string(), context)
     }
 
+    #[tokio::test]
+    async fn scripts_stopped_single_page_stays_clear() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
+        let mut page = frame_page("single-scripts");
+        page.navigate("about:blank").await.unwrap();
+        assert!(!page.scripts_stopped());
+        page.js.as_mut().unwrap().evaluate("(function(){ setTimeout(() => { globalThis.ran = true }, 0); return true; })()").unwrap();
+        page.js.as_mut().unwrap().run_event_loop().await.unwrap();
+        assert_eq!(page.js.as_mut().unwrap().evaluate("globalThis.ran === true").unwrap(), serde_json::json!(true));
+        assert!(!page.scripts_stopped());
+    }
+
+    #[tokio::test]
+    async fn scripts_stopped_new_document_restarts_timer() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = [0u8; 1024];
+                    let _ = stream.read(&mut request).await;
+                    let body = "<html><body><script>setTimeout(() => { globalThis.ran = true }, 0)</script></body></html>";
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let mut page = frame_page("new-document-scripts");
+        page.navigate(&url).await.unwrap();
+        page.suspend_js();
+        page.resume_js();
+        page.navigate(&url).await.unwrap();
+        assert!(!page.scripts_stopped());
+        page.js.as_mut().unwrap().run_event_loop().await.unwrap();
+        assert_eq!(page.js.as_mut().unwrap().evaluate("globalThis.ran === true").unwrap(), serde_json::json!(true));
+        assert!(!page.scripts_stopped());
+    }
+
+    #[tokio::test]
+    async fn scripts_stopped_tracks_document_across_page_switches() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
+        let mut first = frame_page("stopped-first");
+        first.navigate("about:blank").await.unwrap();
+        assert!(!first.scripts_stopped());
+        first.js.as_mut().unwrap().evaluate("(function(){ globalThis.ran = true; setTimeout(() => {}, 0); return ran; })()").unwrap();
+        assert!(!first.scripts_stopped());
+        first.suspend_js();
+        let mut second = frame_page("stopped-second");
+        second.navigate("about:blank").await.unwrap();
+        assert!(first.scripts_stopped());
+        assert!(!second.scripts_stopped());
+        second.suspend_js();
+        first.resume_js();
+        assert!(first.scripts_stopped());
+        assert!(second.scripts_stopped());
+        first.navigate("about:blank").await.unwrap();
+        assert!(!first.scripts_stopped());
+        first.js.as_mut().unwrap().evaluate("(function(){ setTimeout(() => { globalThis.timerRan = true }, 0); return true; })()").unwrap();
+        first.js.as_mut().unwrap().run_event_loop().await.unwrap();
+        assert_eq!(first.js.as_mut().unwrap().evaluate("globalThis.timerRan === true").unwrap(), serde_json::json!(true));
+    }
+
     /// An iframe inside a shadow root is absent from
     /// `document.querySelectorAll('iframe')` — real Chrome reports 0 for it too
     /// — so a liveness check built on that query reads a live frame as detached
@@ -5503,6 +5668,7 @@ mod tests {
     /// frame it depends on would be discarded moments after it loaded.
     #[tokio::test(flavor = "current_thread")]
     async fn a_frame_inside_a_shadow_root_survives_the_detach_sweep() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
         let base = spawn_shadow_frame_server().await;
         let mut page = frame_page("shadow-frame-survives");
@@ -5529,6 +5695,7 @@ mod tests {
     /// its realm and every reference the page realm holds to it released.
     #[tokio::test(flavor = "current_thread")]
     async fn removing_an_iframe_releases_its_realm() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
         let base = spawn_shadow_frame_server().await;
         let mut page = frame_page("detached-frame-released");
@@ -5563,6 +5730,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn suspend_resume_preserves_document_script_start_state() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             "script-state-suspend".to_string(),
             None,
@@ -5639,6 +5807,7 @@ mod tests {
 
     #[test]
     fn new_document_does_not_inherit_suspended_script_ids() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             "script-state-navigation".to_string(),
             None,
@@ -5696,6 +5865,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn module_graph_and_evaluation_share_one_active_budget() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         use std::io::{Read as _, Write as _};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5763,6 +5933,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn queued_module_does_not_spend_its_budget_waiting_for_deferred_script() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         use std::io::{Read as _, Write as _};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5818,6 +5989,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn parser_import_map_before_first_module_controls_resolution() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_parser_import_map_server(1);
         let mut page = import_map_test_page(
             "import-map-order",
@@ -5851,6 +6023,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn later_import_map_adds_unrelated_rule_without_rebinding_resolved_rule() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_parser_import_map_server(2);
         let mut page = import_map_test_page(
             "multiple-import-map-order",
@@ -5894,6 +6067,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn classic_dynamic_import_does_not_see_a_later_parser_import_map() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let (base, _requests) = spawn_parser_import_map_server(1);
         let mut page = import_map_test_page(
             "classic-before-import-map",
@@ -5921,6 +6095,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ready_async_classic_script_runs_before_a_later_parser_import_map() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_parser_import_map_server(2);
         let mut page = import_map_test_page(
             "async-classic-before-map",
@@ -5951,6 +6126,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dynamically_inserted_import_map_controls_later_dynamic_import() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_parser_import_map_server(1);
         let mut page = import_map_test_page(
             "dynamic-import-map",
@@ -5987,6 +6163,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn preload_dynamic_script_delays_load_but_not_dom_content_loaded() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_delayed_classic_script_server(
             std::time::Duration::from_millis(150),
             "globalThis.__lifecycleOrder.push('dynamic-exec');",
@@ -6050,6 +6227,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn load_delaying_script_progresses_through_continuously_ready_timer_work() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_delayed_classic_script_server(
             std::time::Duration::from_millis(75),
             "globalThis.__fairDynamicRan = true;",
@@ -6100,6 +6278,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn load_delaying_script_driver_respects_absolute_deadline() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_delayed_classic_script_server(
             std::time::Duration::from_secs(1),
             "globalThis.__lateDynamicRan = true;",
@@ -6158,6 +6337,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn post_load_dynamic_script_waits_only_when_caller_requests_settle() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_delayed_classic_script_server(
             std::time::Duration::from_millis(400),
             "globalThis.__postLoadDynamicRan = true;",
@@ -6216,6 +6396,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn timer_hydration_runs_during_explicit_adaptive_settle_not_navigation_load() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let mut page = import_map_test_page(
             "timer-hydration-lifecycle",
             "http://example.com",
@@ -6260,6 +6441,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn lazy_module_graph_is_post_load_work_until_caller_settles() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         use std::io::{Read as _, Write as _};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -6337,6 +6519,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ordinary_fetch_does_not_extend_dynamic_module_settle() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         use std::io::{Read as _, Write as _};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -6398,6 +6581,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dynamic_import_map_uses_live_document_base_at_insertion() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_parser_import_map_server(1);
         let mut page = import_map_test_page(
             "dynamic-import-map-base",
@@ -6435,6 +6619,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn later_base_element_does_not_rebase_an_earlier_import_map() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         let (base, requests) = spawn_parser_import_map_server(1);
         let mut page = import_map_test_page(
             "temporal-import-map-base",
@@ -6468,6 +6653,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn page_transport_prefetches_once_and_capture_reuses_the_bytes() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -6478,9 +6664,18 @@ mod tests {
             while std::time::Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut request = [0u8; 2048];
-                        let read = stream.read(&mut request).unwrap_or(0);
-                        let first = String::from_utf8_lossy(&request[..read])
+                        stream.set_nonblocking(false).unwrap();
+                        stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+                        let mut request = Vec::new();
+                        let mut chunk = [0u8; 512];
+                        while request.len() < 8192 && !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match stream.read(&mut chunk) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => request.extend_from_slice(&chunk[..n]),
+                            }
+                        }
+                        if !request.windows(4).any(|w| w == b"\r\n\r\n") { continue; }
+                        let first = String::from_utf8_lossy(&request)
                             .lines()
                             .next()
                             .unwrap_or_default()
@@ -6537,10 +6732,8 @@ mod tests {
             "cache/network fragment normalization must not alter currentSrc"
         );
         page.screenshot(page.viewport).expect("prefetched capture");
-        assert!(seen_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap()
-            .starts_with("GET /asset.svg "));
+        let first_request = seen_rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        assert!(first_request.starts_with("GET /asset.svg "), "unexpected first request: {first_request:?}");
         assert!(
             seen_rx
                 .recv_timeout(std::time::Duration::from_millis(200))
@@ -6552,6 +6745,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn render_resource_deadline_does_not_negative_cache_cancelled_requests() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -6608,6 +6802,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn navigation_post_script_warmup_seeds_dynamic_images_and_fonts() {
+        let _glass_fixture_state = crate::page::glass_fixture_env::local_fixture();
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -6689,6 +6884,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn page_screenshot_uses_the_live_window_scroll_offset() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let context = std::sync::Arc::new(crate::BrowserContext::new("scroll-test".to_string()));
         let mut page = super::Page::new("scroll-page".to_string(), context);
         page.set_viewport((100.0, 80.0));
@@ -6730,6 +6926,7 @@ mod tests {
 
     #[test]
     fn truncate_never_splits_a_multibyte_char() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         // A caller-supplied expression whose byte 80 lands inside a multi-byte
         // char would make `&expression[..80]` panic; the helper truncates safely.
         let s = format!("{}€tail", "a".repeat(79));
@@ -6742,6 +6939,7 @@ mod tests {
 
     #[test]
     fn parse_import_url_extracts_url_forms() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         for (source, expected_url) in [
             (" url(\"basic.css\")", "basic.css"),
             (" url(basic.css)", "basic.css"),
@@ -6761,6 +6959,7 @@ mod tests {
 
     #[test]
     fn parse_import_url_preserves_print_and_color_scheme_media() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         assert_eq!(
             parse_import_url("url(\"p.css\") print"),
             Some(StylesheetImport {
@@ -6786,6 +6985,7 @@ mod tests {
 
     #[test]
     fn split_css_imports_pulls_imports_and_strips_them() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let css = "@import url(\"basic.css\");\nbody { color: red; }";
         let (imports, stripped) = split_css_imports(css);
         assert_eq!(
@@ -6801,6 +7001,7 @@ mod tests {
 
     #[test]
     fn split_css_imports_leaves_import_free_css_untouched() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let css = "body { color: red; }";
         let (imports, stripped) = split_css_imports(css);
         assert!(imports.is_empty());
@@ -6809,6 +7010,7 @@ mod tests {
 
     #[test]
     fn materialized_import_graph_retains_print_condition_and_import_base() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let root_url = url::Url::parse("https://example.test/css/root.css").unwrap();
         let print_url = root_url.join("print/print.css").unwrap();
         let mut sheets = std::collections::HashMap::new();
@@ -6852,6 +7054,7 @@ mod tests {
 
     #[test]
     fn stylesheet_asset_urls_keep_the_importing_sheets_base() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let base = url::Url::parse("https://example.com/css/theme/app.css").unwrap();
         let css = r#"
             .hero { background:url("../img/hero.png") }
@@ -6873,6 +7076,7 @@ mod tests {
 
     #[test]
     fn stylesheet_rel_token_selector_includes_preloaded_stylesheets() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<link rel="preload stylesheet" href="app.css">
                <link rel="preload" href="font.woff2">"#,
@@ -6890,6 +7094,7 @@ mod tests {
 
     #[test]
     fn media_gated_stylesheets_are_fetched_but_disabled_sheets_are_not() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<link rel="stylesheet" href="screen.css">
                <link rel="stylesheet" href="async.css" media="print"
@@ -6911,6 +7116,7 @@ mod tests {
 
     #[test]
     fn print_media_onload_can_activate_a_fetched_stylesheet() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><head>
                 <link id="async" rel="stylesheet" href="async.css" media="print"
@@ -6958,6 +7164,7 @@ mod tests {
 
     #[test]
     fn true_print_stylesheet_loads_and_remains_media_gated() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><head>
                 <link id="print" rel="stylesheet" href="print.css" media="print"
@@ -7007,6 +7214,7 @@ mod tests {
 
     #[test]
     fn materialized_linked_stylesheets_expose_link_owned_cssom_with_origin_security() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><head>
                 <link id="same" rel="stylesheet" href="/assets/app.css" title="app">
@@ -7107,6 +7315,7 @@ mod tests {
 
     #[test]
     fn external_stylesheets_keep_their_positions_between_inline_sheets() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let dom = parse_html(
             r#"<html><head>
                 <link rel="stylesheet" href="first.css">
@@ -7151,6 +7360,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn parser_script_body_replacement_survives_navigation() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let mut page = client_replacement_page("parser-client-replacement", false);
         let target = page.url_string();
 
@@ -7163,6 +7373,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn timer_body_replacement_survives_settle() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         let mut page = client_replacement_page("timer-client-replacement", true);
         let target = page.url_string();
         page.navigate(&target)
@@ -7187,6 +7398,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[test]
     fn settle_resource_warmup_uses_only_remaining_absolute_budget() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         assert_eq!(
             remaining_settle_resource_warmup_ms(
                 1_000,
@@ -7224,6 +7436,7 @@ mod tests {
 
     #[test]
     fn url_matches_cdp_pattern_handles_wildcards_across_url_parts() {
+        let _glass_isolated_state = crate::page::glass_fixture_env::isolated_state();
         assert!(url_matches_cdp_pattern(
             "*://*.gstatic.com/*.woff2",
             "https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTcviYwYZ8UA3.woff2",
@@ -7307,3 +7520,6 @@ fn response_body_byte_limit() -> usize {
         .and_then(|v| v.parse().ok())
         .unwrap_or(2 * 1024 * 1024)
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

@@ -71,6 +71,7 @@ async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session
 
 #[tokio::test(flavor = "current_thread")]
 async fn dynamic_stylesheet_fires_load() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve().await;
     let mut ctx = CdpContext::new();
@@ -117,3 +118,6 @@ async fn dynamic_stylesheet_fires_load() {
         "the page must advance to stage2 once the stylesheet link loads"
     );
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

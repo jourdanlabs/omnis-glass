@@ -48,6 +48,13 @@ pub fn gate_http_outbound(
     )
 }
 
+/// Reuse a matching CDP authorization for one initial document GET.
+/// The caller must have verified the request method and document type.
+pub fn gate_http_document_get(url: &Url, session_id: &str, allow_private_network: bool) -> Result<(), String> {
+    if crate::session::consume_approved_http_navigation(url) { return Ok(()); }
+    gate_http_outbound(url, None, HttpGateAction::Navigate, session_id, allow_private_network)
+}
+
 /// Test-only HTTP gate — passes an explicit enforce override for integration
 /// fixtures. Production paths (`ops.rs`, `client.rs`) must use
 /// [`gate_http_outbound`] instead.

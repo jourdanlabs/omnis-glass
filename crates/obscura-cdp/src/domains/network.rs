@@ -161,6 +161,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_cookie_without_session_targets_default_context() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let params = json!({
             "name": "sid",
@@ -179,6 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_cookies_without_session_targets_default_context() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let params = json!({
             "cookies": [
@@ -194,6 +196,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_cookies_without_session_targets_default_context() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         ctx.default_context
             .cookie_jar
@@ -207,6 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_all_cookies_returns_every_cookie_in_jar() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         ctx.default_context.cookie_jar.set_cookies_from_cdp(vec![
             sample_cookie("a"),
@@ -221,6 +225,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_cookies_falls_back_to_default_context_when_no_session() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         ctx.default_context
             .cookie_jar
@@ -235,6 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_browser_cookies_without_session_clears_default_context() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         ctx.default_context
             .cookie_jar
@@ -247,6 +253,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_blocked_urls_targets_session_page_without_enabling_interception() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("session-1".to_string());
@@ -280,6 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_blocked_urls_without_session_updates_existing_pages() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let left = ctx.create_page();
         let right = ctx.create_page();
@@ -305,6 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_blocked_urls_replaces_existing_patterns() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("session-1".to_string());
@@ -335,6 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_response_body_returns_stored_document_body() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("session-1".to_string());
@@ -361,6 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_response_body_errors_for_unknown_request_id() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let err = handle(
             "getResponseBody",
@@ -376,6 +387,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_disable_clears_stored_response_bodies() {
+        let _glass_isolated_state = crate::domains::network::glass_fixture_env::isolated_state();
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session_id = Some("session-1".to_string());
@@ -428,3 +440,6 @@ pub(crate) fn cookie_info_to_cdp_json(c: &obscura_net::CookieInfo) -> Value {
         "priority": "Medium",
     })
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

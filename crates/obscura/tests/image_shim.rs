@@ -47,6 +47,7 @@ fn spawn_server(html: &'static str) -> String {
 
 #[tokio::test]
 async fn new_image_survives_non_configurable_src() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(
         r#"<!doctype html><html><body><div id="r">waiting</div>
@@ -80,6 +81,7 @@ async fn new_image_survives_non_configurable_src() {
 
 #[tokio::test]
 async fn new_image_still_emulates_load_when_src_is_configurable() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(
         r#"<!doctype html><html><body><div id="r">waiting</div>
@@ -116,6 +118,7 @@ async fn new_image_still_emulates_load_when_src_is_configurable() {
 #[cfg(feature = "render")]
 #[tokio::test]
 async fn invalid_image_bytes_emit_error_like_chromium() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_server(
         r#"<!doctype html><html><body><div id="r">waiting</div>
@@ -149,3 +152,6 @@ async fn invalid_image_bytes_emit_error_like_chromium() {
         "invalid image bytes must fail instead of being treated as a decoded image"
     );
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

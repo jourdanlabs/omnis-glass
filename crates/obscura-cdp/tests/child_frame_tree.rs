@@ -92,6 +92,7 @@ async fn attached_session(ctx: &mut CdpContext) -> String {
 
 #[tokio::test(flavor = "current_thread")]
 async fn get_frame_tree_reports_nested_child_frames() {
+    let _fixture_state = fixture_support::local_fixture();
     std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve().await;
     let mut ctx = CdpContext::new();
@@ -183,3 +184,6 @@ async fn get_frame_tree_reports_nested_child_frames() {
         .count();
     assert_eq!(repeats, 0, "the same frame was announced twice");
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

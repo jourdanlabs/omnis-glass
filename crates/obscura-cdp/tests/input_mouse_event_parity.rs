@@ -120,6 +120,7 @@ async fn scroll_state(ctx: &mut CdpContext, id: u64, sid: &str) -> Value {
 
 #[tokio::test(flavor = "current_thread")]
 async fn wheel_over_page_scrolls_the_root_on_both_axes() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     wheel(&mut ctx, 2, &sid, 600.0, 300.0, 45.0, 160.0).await;
     let state = scroll_state(&mut ctx, 3, &sid).await;
@@ -131,6 +132,7 @@ async fn wheel_over_page_scrolls_the_root_on_both_axes() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn wheel_over_nested_overflow_scrolls_the_nested_container() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     wheel(&mut ctx, 2, &sid, 50.0, 50.0, 70.0, 110.0).await;
     let state = scroll_state(&mut ctx, 3, &sid).await;
@@ -142,6 +144,7 @@ async fn wheel_over_nested_overflow_scrolls_the_nested_container() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn wheel_offsets_clamp_to_nested_scroll_extents() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     wheel(&mut ctx, 2, &sid, 50.0, 50.0, 100_000.0, 100_000.0).await;
     let state = scroll_state(&mut ctx, 3, &sid).await;
@@ -156,6 +159,7 @@ async fn wheel_offsets_clamp_to_nested_scroll_extents() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn wheel_chains_to_root_when_nested_scroller_is_saturated() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     evaluate(
         &mut ctx,
@@ -175,6 +179,7 @@ async fn wheel_chains_to_root_when_nested_scroller_is_saturated() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn canceling_wheel_prevents_its_scroll_default() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     evaluate(
         &mut ctx,
@@ -221,6 +226,7 @@ async fn canceling_wheel_prevents_its_scroll_default() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn hit_testing_clips_scrolled_children_at_overflow_padding_edge() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     let result = evaluate(
         &mut ctx,
@@ -247,6 +253,7 @@ async fn hit_testing_clips_scrolled_children_at_overflow_padding_edge() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn press_release_orders_events_and_defers_click_activation() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     evaluate(
         &mut ctx,
@@ -325,6 +332,7 @@ async fn press_release_orders_events_and_defers_click_activation() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn radio_release_selects_only_the_target_in_its_group() {
+    let _fixture_state = fixture_support::local_fixture();
     let (mut ctx, sid) = setup().await;
     evaluate(
         &mut ctx,
@@ -375,3 +383,6 @@ async fn radio_release_selects_only_the_target_in_its_group() {
         "the newly selected radio alone receives activation events"
     );
 }
+
+#[path = "support/fixture.rs"]
+mod fixture_support;

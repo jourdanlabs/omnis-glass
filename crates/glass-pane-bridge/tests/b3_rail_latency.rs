@@ -54,8 +54,31 @@ fn b3_rail_shows_navigate_within_500ms() {
 #[test]
 #[ignore = "can-fail mirror — must fail when run with --ignored"]
 fn b3_WEAKEN_would_miss_rail_deadline() {
+    let dir = tempdir().unwrap();
+    env(&dir);
+    let start = Instant::now();
+    gate_browser_action(
+        BrowserAction::Navigate,
+        "https://example.com",
+        None,
+        "b3-weaken",
+    )
+    .expect("gate navigate");
+
+    let empty = tempdir().unwrap();
+    let mut tailer = ReceiptTailer::new(empty.path());
+    let mut found = false;
+    while start.elapsed() < Duration::from_millis(500) {
+        let entries = tailer.poll_actions().unwrap();
+        if entries.iter().any(|e| e.action == "navigate" && e.verdict == "ALLOW") {
+            found = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(
-        Duration::from_secs(10) < Duration::from_millis(500),
-        "WEAKEN: impossible deadline"
+        found,
+        "WEAKEN: live rail must surface ALLOW navigate within 500ms (elapsed {:?})",
+        start.elapsed()
     );
 }

@@ -67,3 +67,13 @@ pub fn browser_ws_url(host: &str, port: u16) -> String {
         format!("ws://{host}:{port}/devtools/browser")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn same_length_wrong_token_is_refused() {
+        std::env::set_var("OMNIS_GLASS_CDP_AUTH", "1");
+        let head = "GET /devtools/browser/abcdefgg HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert!(!super::token_from_request_head(head, "abcdefgh"));
+    }
+}

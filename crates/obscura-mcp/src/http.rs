@@ -397,12 +397,14 @@ mod mcp_hardening_tests {
 
     #[test]
     fn no_allowlist_is_permissive() {
+        let _glass_isolated_state = crate::http::glass_fixture_env::isolated_state();
         assert!(origin_allowed(Some("https://evil.example"), None));
         assert!(origin_allowed(None, None));
     }
 
     #[test]
     fn allowlist_matches_case_insensitively_and_rejects_others() {
+        let _glass_isolated_state = crate::http::glass_fixture_env::isolated_state();
         let list = Some("http://localhost:3000, https://app.example.com");
         assert!(origin_allowed(Some("http://localhost:3000"), list));
         assert!(origin_allowed(Some("https://APP.example.com"), list));
@@ -413,6 +415,7 @@ mod mcp_hardening_tests {
 
     #[test]
     fn body_cap_is_sane() {
+        let _glass_isolated_state = crate::http::glass_fixture_env::isolated_state();
         // Far above a real JSON-RPC tool call, far below an OOM-inducing value.
         assert!(MAX_BODY_BYTES >= 1 << 20);
         assert!(MAX_BODY_BYTES <= 64 << 20);
@@ -420,12 +423,14 @@ mod mcp_hardening_tests {
 
     #[test]
     fn request_read_timeout_is_generous_but_bounded() {
+        let _glass_isolated_state = crate::http::glass_fixture_env::isolated_state();
         assert!(REQUEST_READ_TIMEOUT >= Duration::from_secs(10));
         assert!(REQUEST_READ_TIMEOUT <= Duration::from_secs(60));
     }
 
     #[tokio::test]
     async fn stalled_request_line_hits_deadline() {
+        let _glass_isolated_state = crate::http::glass_fixture_env::isolated_state();
         let (_client, server) = tokio::io::duplex(64);
         let mut reader = BufReader::new(server);
         let err = match read_request_with_timeout(&mut reader, None, Duration::from_millis(20))
@@ -439,6 +444,7 @@ mod mcp_hardening_tests {
 
     #[tokio::test]
     async fn stalled_request_body_hits_deadline() {
+        let _glass_isolated_state = crate::http::glass_fixture_env::isolated_state();
         let (mut client, server) = tokio::io::duplex(64);
         client
             .write_all(
@@ -460,3 +466,6 @@ mod mcp_hardening_tests {
         assert!(err.to_string().contains("timed out"));
     }
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }

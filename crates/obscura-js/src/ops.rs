@@ -1259,6 +1259,9 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
         }
         #[cfg(feature = "render")]
         if !reset_nodes.is_empty() {
+            if matches!(cmd.as_str(), "remove_child" | "set_inner_html" | "set_inner_html_context" | "set_text_content") {
+                state.render_resources.remove_form_values(&reset_nodes);
+            }
             state
                 .element_scroll_offsets
                 .retain(|node, _| !reset_nodes.contains(node));
@@ -4726,6 +4729,54 @@ fn op_canvas_paint_damage(state: &OpState, nid: u32) -> bool {
     connected
 }
 
+/// Keep a bounded paint-only copy; malformed input is ignored without unwinding into V8.
+#[cfg(feature = "render")]
+#[op2(fast)]
+fn op_form_paint_value(scope: &mut v8::HandleScope, state: &OpState, nid: u32, value: v8::Local<v8::Value>, clear: bool, frame_id: u32) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let shared = frame_state(state, frame_id);
+        let mut state = shared.borrow_mut();
+        let node = NodeId::new(nid);
+        let Some(dom_node) = state.dom.as_ref().and_then(|dom| dom.get_node(node)) else { return; };
+        if !dom_node.as_element().is_some_and(|name| matches!(name.local.as_ref(), "input" | "textarea")) { return; }
+        let connected = dom_node.connected;
+        let Ok(value) = v8::Local::<v8::String>::try_from(value) else { return; };
+        let mut units = vec![0u16; value.length().min(8192)];
+        value.write_v2(scope, 0, &mut units, v8::WriteFlags::empty());
+        let mut bounded = String::from_utf16_lossy(&units);
+        if let Some((end, _)) = bounded.char_indices().nth(4096) { bounded.truncate(end); }
+        let changed = state.render_resources.set_form_value_owned(node, if clear { None } else { Some(bounded) });
+        if connected && changed {
+            state.activity_generation = state.activity_generation.wrapping_add(1);
+            state.prepared_render = None;
+        }
+    }));
+}
+
+/// Keep live checked state for paint without reflecting it to the DOM.
+#[cfg(feature = "render")]
+#[op2(fast)]
+fn op_form_paint_checked(scope: &mut v8::HandleScope, state: &OpState, nid: u32, value: v8::Local<v8::Value>, clear: bool, frame_id: u32) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let shared = frame_state(state, frame_id);
+        let mut state = shared.borrow_mut();
+        let node = NodeId::new(nid);
+        let Some(dom_node) = state.dom.as_ref().and_then(|dom| dom.get_node(node)) else { return; };
+        if !dom_node.as_element().is_some_and(|name| name.local.as_ref() == "input") { return; }
+        if !matches!(dom_node.get_attribute("type").unwrap_or("").to_ascii_lowercase().as_str(), "checkbox" | "radio") { return; }
+        if !value.is_boolean() { return; }
+        let connected = dom_node.connected;
+        let default = dom_node.get_attribute("checked").is_some();
+        let before = state.render_resources.form_checked(node).unwrap_or(default);
+        let next = if clear { None } else { Some(value.boolean_value(scope)) };
+        state.render_resources.set_form_checked(node, next);
+        if connected && before != next.unwrap_or(default) {
+            state.activity_generation = state.activity_generation.wrapping_add(1);
+            state.prepared_render = None;
+        }
+    }));
+}
+
 pub fn build_extension() -> Extension {
     let mut ops = vec![
         op_dom(),
@@ -4766,6 +4817,8 @@ pub fn build_extension() -> Extension {
     // probes with typeof before calling, so the op's absence is a clean fallback.
     #[cfg(feature = "render")]
     {
+        ops.push(op_form_paint_value());
+        ops.push(op_form_paint_checked());
         ops.push(op_begin_render_task());
         ops.push(op_set_dynamic_fonts());
         ops.push(op_canvas_register_surface());

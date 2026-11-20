@@ -4,6 +4,7 @@ use std::process::Command;
 
 #[test]
 fn screenshot_keeps_outset_shadow_outside_transparent_border_box() {
+        let _glass_fixture_state = crate::glass_fixture_env::local_fixture();
     let path = std::env::temp_dir().join(format!(
         "obscura-outset-shadow-{}.png",
         std::process::id()
@@ -38,3 +39,6 @@ fn screenshot_keeps_outset_shadow_outside_transparent_border_box() {
 
     std::fs::remove_file(path).expect("remove screenshot");
 }
+
+#[cfg(test)]
+mod glass_fixture_env { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-support/local_fixture.rs")); }
